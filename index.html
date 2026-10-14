@@ -317,7 +317,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -1594,6 +1594,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">'+(g.rutaNombre?esc(g.rutaNombre)+' · ':'')+fmtFecha(g.fecha)+(g.nota?(' · '+esc(g.nota)):'')+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;color:var(--red);">'+fmtCOP(g.monto)+'</span>'+
+          (state.isAdmin ? '<button class="btn btn-sm btn-ghost" data-action="editar-gasto" data-id="'+g.id+'">✎</button>' : '')+
           ((state.isAdmin || (state.auth.user && g.creadoPor===state.auth.user.uid)) ? '<button class="btn btn-sm btn-ghost" data-action="eliminar-gasto" data-id="'+g.id+'">✕</button>' : '')+
         '</div>'+
       '</div></div>';
@@ -1795,17 +1796,19 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-primary" style="flex:1" data-action="guardar-garantia">Registrar</button>'+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>';
-    } else if(state.modal.type==='nuevo-gasto'){
-      html = '<h3>Registrar gasto de ruta</h3>'+
-        '<div class="field"><label>Concepto</label><input id="mga-concepto" placeholder="Ej: gasolina, peaje, almuerzo"></div>'+
-        '<div class="field"><label>Monto</label><input id="mga-monto" type="number" min="0" placeholder="Ej: 15000"></div>'+
+    } else if(state.modal.type==='nuevo-gasto' || state.modal.type==='editar-gasto'){
+      var gEd = state.modal.gasto || null;
+      var rutaSelG = gEd ? (gEd.rutaId||'') : (state.selectedRutaId!=='__todas__' ? state.selectedRutaId : '');
+      html = '<h3>'+(gEd?'Editar gasto':'Registrar gasto de ruta')+'</h3>'+
+        '<div class="field"><label>Concepto</label><input id="mga-concepto" placeholder="Ej: gasolina, peaje, almuerzo" value="'+esc(gEd?gEd.concepto:'')+'"></div>'+
+        '<div class="field"><label>Monto</label><input id="mga-monto" type="number" inputmode="numeric" min="0" placeholder="Ej: 15000" value="'+(gEd?esc(gEd.monto):'')+'"></div>'+
         '<div class="field"><label>Ruta (opcional)</label><select id="mga-ruta">'+
           '<option value="">Sin ruta</option>'+
-          state.rutas.map(function(r){return '<option value="'+r.id+'"'+(state.selectedRutaId===r.id?' selected':'')+'>'+esc(r.nombre)+'</option>';}).join('')+
+          state.rutas.map(function(r){return '<option value="'+r.id+'"'+(rutaSelG===r.id?' selected':'')+'>'+esc(r.nombre)+'</option>';}).join('')+
         '</select></div>'+
-        '<div class="field"><label>Nota (opcional)</label><input id="mga-nota" placeholder="Detalle adicional"></div>'+
+        '<div class="field"><label>Nota (opcional)</label><input id="mga-nota" placeholder="Detalle adicional" value="'+esc(gEd?(gEd.nota||''):'')+'"></div>'+
         '<div class="row" style="margin-top:10px;">'+
-          '<button class="btn btn-primary" style="flex:1" data-action="guardar-gasto">Registrar gasto</button>'+
+          '<button class="btn btn-primary" style="flex:1" data-action="guardar-gasto">'+(gEd?'Guardar cambios':'Registrar gasto')+'</button>'+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>';
     } else if(state.modal.type==='nuevo-cliente' || state.modal.type==='editar-cliente'){
@@ -1953,6 +1956,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.modal = null; render();
       toast('Factura #'+vDel.numero+' eliminada y productos devueltos al stock');
     }
+    else if(action==='editar-gasto'){
+      var gSel = state.gastos.find(function(g){ return g.id===id; });
+      if(gSel){ state.modal = {type:'editar-gasto', gasto:gSel}; render(); }
+    }
     else if(action==='cancelar-edicion'){
       state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
       state.checkoutPago = 'contado'; state.checkoutAbono = 0;
@@ -2071,6 +2078,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var notaGasto = document.getElementById('mga-nota').value.trim();
       if(!conceptoG){ toast('El concepto es obligatorio'); return; }
       if(montoG<=0){ toast('Ingresa un monto válido'); return; }
+      if(state.modal.type==='editar-gasto'){
+        var rutaObjG = rutaG ? rutaById(rutaG) : null;
+        db.doc('gastos/'+state.modal.gasto.id).update({
+          concepto:conceptoG, monto:montoG, rutaId:rutaG||null, rutaNombre:rutaObjG?rutaObjG.nombre:'',
+          nota:notaGasto, editadoEn:todayISO(), editadoPor:nombreUsuario()
+        });
+        state.modal=null; render(); toast('Gasto actualizado');
+        return;
+      }
       await registrarGasto({concepto:conceptoG, monto:montoG, rutaId:rutaG, nota:notaGasto});
       state.modal=null; render(); toast('Gasto registrado');
     }
