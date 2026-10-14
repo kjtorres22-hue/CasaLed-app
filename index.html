@@ -192,7 +192,7 @@
   .badge-salida{ background:rgba(96,165,250,.15); color:var(--blue); }
   .badge-garantia{ background:rgba(248,113,113,.15); color:var(--red); }
   .toast{
-    position:fixed; bottom:80px; left:50%; transform:translateX(-50%); z-index:60;
+    position:fixed; bottom:150px; left:50%; transform:translateX(-50%); z-index:60; max-width:90vw; text-align:center;
     background:var(--text); color:var(--bg); padding:10px 18px; border-radius:999px; font-size:13.5px; font-weight:600;
     box-shadow:0 6px 18px rgba(0,0,0,.3);
   }
@@ -315,11 +315,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     // auth: loading | signedOut | verify | pending | blocked | ready
     auth: { status:'loading', user:null, perfil:null, pantalla:'login', error:'' },
     usuarios: [],
+    jornadas: [],
     importando: false,
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -526,31 +527,35 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   function init(){
     db.collection('productos').orderBy('orden').onSnapshot(function(snap){
       state.productos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
+      render({preservar:true});
     });
     db.collection('clientes').orderBy('nombre').onSnapshot(function(snap){
       state.clientes = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
+      render({preservar:true});
     });
     db.collection('rutas').onSnapshot(function(snap){
       state.rutas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
+      render({preservar:true});
     });
     db.collection('movimientos').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.movimientos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
+      render({preservar:true});
     });
     db.collection('ventas').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.ventas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
+      render({preservar:true});
     });
     db.collection('gastos').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.gastos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
+      render({preservar:true});
     });
     db.doc('config/general').onSnapshot(function(snap){
       state.config = snap.exists ? snap.data() : null;
-      render();
+      render({preservar:true});
+    });
+    db.collection('jornadas').orderBy('iniciadaEn','desc').limit(60).onSnapshot(function(snap){
+      state.jornadas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      render({preservar:true});
     });
     if(state.isAdmin){
       db.collection('usuarios').onSnapshot(function(snap){
@@ -559,6 +564,81 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       });
     }
     render();
+  }
+
+  // ---------- JORNADAS DE RUTA ----------
+  function miJornada(){
+    var uid = state.auth.user && state.auth.user.uid;
+    return state.jornadas.find(function(j){ return j.estado==='abierta' && j.iniciadaPor===uid; }) || null;
+  }
+  function horaCorta(iso){ try{ return new Date(iso).toLocaleTimeString('es-CO',{hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } }
+  function iniciarRuta(rutaId){
+    var r = rutaById(rutaId); if(!r) return;
+    var ref = doc(collection(fs, 'jornadas'));
+    var j = { rutaId:r.id, rutaNombre:r.nombre, estado:'abierta', iniciadaEn:todayISO(),
+      iniciadaPor:state.auth.user.uid, iniciadaPorNombre:nombreUsuario() };
+    enSegundoPlano(setDoc(ref, j));
+    state.jornadas = [Object.assign({id:ref.id}, j)].concat(state.jornadas);
+    state.selectedRutaId = r.id; state.selectedClienteId = null; state.cart = {};
+  }
+  // Balance de una jornada: se calcula con las ventas y gastos actuales (incluye ediciones y facturas eliminadas).
+  function resumenJornada(j){
+    var ventas = state.ventas.filter(function(v){ return v.jornadaId===j.id; }).sort(function(a,b){ return (a.numero||0)-(b.numero||0); });
+    var gastos = state.gastos.filter(function(g){ return g.jornadaId===j.id; });
+    var r = { facturas:ventas.length, totalVendido:0, contado:0, credito:0, abonos:0, saldoPendiente:0,
+      unidades:0, totalGastos:0, productos:[], deudores:[], gastos:[], numeros:[] };
+    var porProd = {};
+    ventas.forEach(function(v){
+      var t = Number(v.total)||0;
+      r.totalVendido += t; r.numeros.push(v.numero);
+      if(v.tipoPago==='credito'){
+        r.credito += t; r.abonos += Number(v.abono)||0; r.saldoPendiente += Number(v.saldo)||0;
+        if((Number(v.saldo)||0) > 0) r.deudores.push({cliente:v.clienteNombre||'', numero:v.numero, saldo:Number(v.saldo)||0, total:t});
+      } else { r.contado += t; }
+      (v.items||[]).forEach(function(it){
+        var k = it.nombre;
+        if(!porProd[k]) porProd[k] = {nombre:it.nombre, cantidad:0, total:0};
+        porProd[k].cantidad += Number(it.cantidad)||0; porProd[k].total += Number(it.subtotal)||0;
+        r.unidades += Number(it.cantidad)||0;
+      });
+    });
+    r.productos = Object.keys(porProd).map(function(k){ return porProd[k]; }).sort(function(a,b){ return b.cantidad-a.cantidad; });
+    gastos.forEach(function(g){ r.totalGastos += Number(g.monto)||0; r.gastos.push({concepto:g.concepto, monto:Number(g.monto)||0, nota:g.nota||''}); });
+    r.recibido = r.contado + r.abonos;
+    r.efectivoNeto = r.recibido - r.totalGastos;
+    return r;
+  }
+  function cerrarJornada(j){
+    var resumen = resumenJornada(j);
+    var cambios = { estado:'cerrada', cerradaEn:todayISO(), cerradaPor:nombreUsuario(), resumen:resumen };
+    enSegundoPlano(updateDoc(doc(fs, 'jornadas/'+j.id), cambios));
+    var cerrada = Object.assign({}, j, cambios);
+    state.jornadas = state.jornadas.map(function(x){ return x.id===j.id ? cerrada : x; });
+    state.cart = {}; state.selectedClienteId = null;
+    return cerrada;
+  }
+  function textoBalance(j, r){
+    var L = [];
+    L.push('*Balance '+j.rutaNombre+'* · '+(j.iniciadaPorNombre||''));
+    L.push(fmtFecha(j.iniciadaEn)+(j.cerradaEn?(' → '+horaCorta(j.cerradaEn)):' (en curso)'));
+    L.push('');
+    L.push('Facturas: '+r.facturas+(r.numeros.length?(' (N.° '+r.numeros.join(', ')+')'):''));
+    L.push('*Total vendido: '+fmtCOP(r.totalVendido)+'*');
+    L.push('Contado: '+fmtCOP(r.contado)+' · Crédito: '+fmtCOP(r.credito));
+    L.push('Abonos recibidos: '+fmtCOP(r.abonos));
+    L.push('*Dinero recibido: '+fmtCOP(r.recibido)+'*');
+    L.push('Gastos: '+fmtCOP(r.totalGastos));
+    L.push('*Efectivo a entregar: '+fmtCOP(r.efectivoNeto)+'*');
+    L.push('*Quedaron debiendo: '+fmtCOP(r.saldoPendiente)+'*');
+    r.deudores.forEach(function(d){ L.push('  · '+d.cliente+' (#'+d.numero+'): '+fmtCOP(d.saldo)); });
+    L.push('');
+    L.push('Productos ('+r.unidades+' und):');
+    r.productos.forEach(function(p){ L.push('  · '+p.cantidad+'x '+p.nombre); });
+    if(r.gastos.length){
+      L.push(''); L.push('Gastos:');
+      r.gastos.forEach(function(g){ L.push('  · '+g.concepto+': '+fmtCOP(g.monto)); });
+    }
+    return L.join('\n');
   }
 
   var EMPRESA_DEFAULT = {
@@ -707,10 +787,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     await db.doc('config/general').set(data, {merge:true});
   }
   async function registrarGasto(data){
-    var ruta = data.rutaId ? rutaById(data.rutaId) : null;
+    var jg = miJornada();
+    var ruta = jg ? rutaById(jg.rutaId) : (data.rutaId ? rutaById(data.rutaId) : null);
     await db.collection('gastos').add({
-      concepto:data.concepto, monto:Number(data.monto)||0,
-      rutaId:data.rutaId||null, rutaNombre:ruta?ruta.nombre:'',
+      concepto:data.concepto, monto:Number(data.monto)||0, jornadaId: jg ? jg.id : null,
+      rutaId:ruta?ruta.id:(data.rutaId||null), rutaNombre:ruta?ruta.nombre:'',
       nota:data.nota||'', fecha:todayISO(),
       creadoPor:state.auth.user.uid, creadoPorNombre:nombreUsuario()
     });
@@ -751,6 +832,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var total = items.reduce(function(s,it){return s+it.subtotal;},0);
     var cfg = cfgEmpresa();
     var ruta = rutaById(cliente.rutaId);
+    var jornadaVenta = miJornada();
+    if(!jornadaVenta){ state.ventaEnCurso = false; toast('Primero inicia la ruta'); return; }
     var tipoPago = state.checkoutPago || 'contado';
     var abono = tipoPago==='credito' ? Math.max(0, Math.min(total, Number(state.checkoutAbono)||0)) : total;
     var saldo = Math.max(0, total - abono);
@@ -767,7 +850,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var fecha = todayISO();
       ventaDoc = {
         numero:numero, clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
-        rutaId:cliente.rutaId||null, rutaNombre:ruta?ruta.nombre:'', items:items, total:total,
+        rutaId:(jornadaVenta?jornadaVenta.rutaId:(cliente.rutaId||null)), rutaNombre:(jornadaVenta?jornadaVenta.rutaNombre:(ruta?ruta.nombre:'')),
+        jornadaId:jornadaVenta?jornadaVenta.id:null, items:items, total:total,
         tipoPago:tipoPago, abono:abono, saldo:saldo, fecha:fecha,
         comentarios:(state.checkoutComentarios||'').trim(),
         vendedorId:state.auth.user.uid, vendedorNombre:nombreUsuario()
@@ -1079,7 +1163,35 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   // ---------- RENDER ----------
-  function render(){
+  // Al llegar datos nuevos de otros celulares se redibuja la pantalla; esto conserva lo que estés escribiendo.
+  function capturarCampos(){
+    var datos = {};
+    document.querySelectorAll('#main input[id], #main textarea[id], .modal input[id], .modal textarea[id]').forEach(function(el){
+      if(el.type==='file' || el.type==='hidden') return;
+      if(el.value !== el.defaultValue) datos[el.id] = { valor: el.value, base: el.defaultValue };
+    });
+    var act = document.activeElement;
+    var foco = (act && act.id && (act.tagName==='INPUT' || act.tagName==='TEXTAREA')) ? { id: act.id, ini: act.selectionStart, fin: act.selectionEnd } : null;
+    return { datos: datos, foco: foco };
+  }
+  function restaurarCampos(c){
+    Object.keys(c.datos).forEach(function(id){
+      var el = document.getElementById(id);
+      if(el && el.defaultValue === c.datos[id].base) el.value = c.datos[id].valor;
+    });
+    if(c.foco){
+      var f = document.getElementById(c.foco.id);
+      if(f){ try{ f.focus({preventScroll:true}); if(c.foco.ini!=null) f.setSelectionRange(c.foco.ini, c.foco.fin); }catch(e){} }
+    }
+  }
+  function render(opts){
+    var capt = (opts && opts.preservar) ? capturarCampos() : null;
+    var scrollModal = (function(){ var m = document.querySelector('.modal'); return m ? m.scrollTop : 0; })();
+    renderInterno();
+    if(capt) restaurarCampos(capt);
+    if(opts && opts.preservar){ var m2 = document.querySelector('.modal'); if(m2) m2.scrollTop = scrollModal; }
+  }
+  function renderInterno(){
     var main = document.getElementById('main');
     var subEl = document.getElementById('header-sub');
     var subs = {vender:'Nuevo pedido', inventario:'Stock y movimientos', garantias:'Registro de garantías', clientes:'Clientes y rutas', historial:'Historial y facturas', reportes:'Ventas, rutas y análisis'};
@@ -1222,24 +1334,35 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   function renderVender(){
-    var rutasHtml = '<div class="chips">' +
-      '<button class="chip'+(state.selectedRutaId==='__todas__'?' active':'')+'" data-action="filtro-ruta" data-ruta="__todas__">Todas</button>' +
-      state.rutas.map(function(r){
-        return '<button class="chip'+(state.selectedRutaId===r.id?' active':'')+'" data-action="filtro-ruta" data-ruta="'+r.id+'">'+esc(r.nombre)+'</button>';
-      }).join('') + '</div>';
+    var jornada = state.editandoVenta ? null : miJornada();
+    if(!state.editandoVenta && !jornada){
+      // Sin ruta iniciada no se puede vender
+      var abiertasOtros = state.jornadas.filter(function(j){ return j.estado==='abierta'; });
+      return '<h2 class="section-title">Elige la ruta para empezar</h2>'+
+        '<div class="small muted" style="margin-bottom:12px;">Para vender y anotar gastos primero inicia la ruta. Al terminar la cierras y te muestra el balance.</div>'+
+        (state.rutas.length ? state.rutas.map(function(r){
+          var otros = abiertasOtros.filter(function(j){ return j.rutaId===r.id; });
+          var nCli = state.clientes.filter(function(c){ return c.rutaId===r.id; }).length;
+          return '<div class="card row between">'+
+            '<div><div class="product-name">'+esc(r.nombre)+'</div>'+
+              '<div class="small muted">'+nCli+' cliente(s)'+(otros.length?(' · En ruta: '+otros.map(function(j){ return esc(j.iniciadaPorNombre||''); }).join(', ')):'')+'</div></div>'+
+            '<button class="btn btn-primary" data-action="iniciar-ruta" data-id="'+r.id+'">Iniciar ruta</button>'+
+          '</div>';
+        }).join('') : '<div class="empty">No hay rutas creadas. El administrador las crea en Clientes.</div>');
+    }
+    if(jornada){ state.selectedRutaId = jornada.rutaId; }
 
-    var clientesFiltrados = state.clientes.filter(function(c){
-      return state.selectedRutaId==='__todas__' || c.rutaId===state.selectedRutaId;
-    });
-
+    var rutaActual = jornada ? jornada.rutaId : null;
+    var clientesRuta = state.clientes.filter(function(c){ return rutaActual && c.rutaId===rutaActual; });
+    var clientesOtros = state.clientes.filter(function(c){ return !(rutaActual && c.rutaId===rutaActual); });
+    var optCli = function(c){ return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+'</option>'; };
     var clienteSel = clienteById(state.selectedClienteId);
     var clienteHtml = '<div class="card">'+
       '<label>Cliente (opcional, también lo puedes elegir o crear al final)</label>'+
       '<select id="sel-cliente">'+
         '<option value="">Selecciona un cliente…</option>'+
-        clientesFiltrados.map(function(c){
-          return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+'</option>';
-        }).join('') +
+        (clientesRuta.length ? '<optgroup label="'+esc(jornada ? jornada.rutaNombre : 'Ruta')+'">'+clientesRuta.map(optCli).join('')+'</optgroup>' : '')+
+        (clientesOtros.length ? '<optgroup label="Otros clientes">'+clientesOtros.map(optCli).join('')+'</optgroup>' : '')+
       '</select>'+
       (clienteSel && clienteSel.direccion ? '<div class="small muted" style="margin-top:8px;">'+esc(clienteSel.direccion)+'</div>' : '') +
       '</div>';
@@ -1280,14 +1403,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '</div>';
     }).join('') : '<div class="empty">Aún no tienes productos. Agrégalos desde la pestaña Inventario.</div>';
 
-    var hoyISO = todayISO().slice(0,10);
-    var gastosHoy = state.gastos.filter(function(g){
-      return (g.fecha||'').slice(0,10)===hoyISO && (state.selectedRutaId==='__todas__' || g.rutaId===state.selectedRutaId);
-    });
+    var gastosHoy = jornada ? state.gastos.filter(function(g){ return g.jornadaId===jornada.id; }) : [];
     var totalGastosHoy = gastosHoy.reduce(function(s,g){return s+(Number(g.monto)||0);},0);
     var gastosHtml = '<div class="card" style="margin-bottom:14px;">'+
       '<div class="row between">'+
-        '<div><div class="product-name">💸 Gastos de hoy'+(state.selectedRutaId!=='__todas__'?' en esta ruta':'')+'</div>'+
+        '<div><div class="product-name">💸 Gastos de la ruta</div>'+
         '<div class="small muted">'+gastosHoy.length+' gasto(s) · <span class="mono">'+fmtCOP(totalGastosHoy)+'</span></div></div>'+
         '<button class="btn btn-sm btn-primary" data-action="abrir-nuevo-gasto">+ Gasto</button>'+
       '</div>'+
@@ -1308,7 +1428,18 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-ghost" data-action="cancelar-edicion">Cancelar</button>'+
         '</div>'+
       '</div>' : '';
-    return bannerEdicion + rutasHtml + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
+    var bannerJornada = '';
+    if(jornada){
+      var rj = resumenJornada(jornada);
+      bannerJornada = '<div class="card" style="border-color:var(--green);">'+
+        '<div class="row between">'+
+          '<div><div class="product-name">🟢 '+esc(jornada.rutaNombre)+'</div>'+
+          '<div class="small muted">Iniciada '+horaCorta(jornada.iniciadaEn)+' · '+rj.facturas+' factura(s) · <span class="mono">'+fmtCOP(rj.totalVendido)+'</span></div></div>'+
+          '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta">Cerrar ruta</button>'+
+        '</div>'+
+      '</div>';
+    }
+    return bannerEdicion + bannerJornada + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
       '<h2 class="section-title">Productos</h2>' +
       '<div class="card">'+productosHtml+'</div>';
   }
@@ -1634,6 +1765,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<h2 class="section-title">Gastos de ruta</h2>'+gastosChips+
       (gastosFiltrados.length ? '<div class="small muted" style="margin-bottom:8px;">Total gastado: <strong class="mono">'+fmtCOP(totalGastosF)+'</strong></div>' : '')+
       '<div class="card">'+gastosHistHtml+'</div>'+
+      '<h2 class="section-title">Rutas</h2><div class="card">'+
+        (state.jornadas.length ? state.jornadas.slice(0, 20).map(function(j){
+          var tot = j.estado==='cerrada' && j.resumen ? j.resumen.totalVendido : resumenJornada(j).totalVendido;
+          return '<div class="list-item"><div class="row between">'+
+            '<div><span class="product-name">'+esc(j.rutaNombre)+'</span> '+
+              (j.estado==='abierta' ? '<span class="badge badge-entrada">En curso</span>' : '<span class="badge" style="background:var(--panel-2);color:var(--muted);">Cerrada</span>')+
+              '<div class="small muted">'+esc(j.iniciadaPorNombre||'')+' · '+fmtFecha(j.iniciadaEn)+' · '+fmtCOP(tot)+'</div></div>'+
+            '<div class="row">'+
+              '<button class="btn btn-sm btn-ghost" data-action="ver-balance" data-id="'+j.id+'">Balance</button>'+
+              (state.isAdmin && j.estado==='abierta' && !(state.auth.user && j.iniciadaPor===state.auth.user.uid) ? '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta-de" data-id="'+j.id+'">Cerrar</button>' : '')+
+            '</div>'+
+          '</div></div>';
+        }).join('') : '<div class="empty">Todavía no se ha iniciado ninguna ruta.</div>')+
+      '</div>'+
       '<h2 class="section-title">Facturas recientes</h2><div class="card">'+facturasHtml+'</div>'+
       '<h2 class="section-title">Movimientos de inventario</h2>'+filtroHtml+
       '<div class="card">'+movsHtml+'</div>'+
@@ -1737,6 +1882,33 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
             : '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Confirmar venta</button>')+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>';
+    } else if(state.modal.type==='balance-ruta'){
+      var jm = state.modal.jornada;
+      var rm = (jm.estado==='cerrada' && jm.resumen) ? jm.resumen : resumenJornada(jm);
+      var filaB = function(etq, val, color, fuerte){ return '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border);"><span class="small'+(fuerte?'':' muted')+'"'+(fuerte?' style="font-weight:700;"':'')+'>'+etq+'</span><span class="mono" style="font-weight:'+(fuerte?'800':'600')+';'+(color?('color:'+color+';'):'')+'">'+val+'</span></div>'; };
+      html = '<h3>Balance · '+esc(jm.rutaNombre)+'</h3>'+
+        '<div class="small muted" style="margin-bottom:12px;">'+esc(jm.iniciadaPorNombre||'')+' · '+fmtFecha(jm.iniciadaEn)+(jm.cerradaEn?(' → '+horaCorta(jm.cerradaEn)):' · en curso')+'</div>'+
+        '<div class="kpi-grid">'+
+          '<div class="kpi"><div class="num mono">'+fmtCOP(rm.totalVendido)+'</div><div class="lbl">Total vendido · '+rm.facturas+' factura(s)</div></div>'+
+          '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(rm.saldoPendiente)+'</div><div class="lbl">Quedaron debiendo</div></div>'+
+        '</div>'+
+        '<div class="card" style="padding:10px 14px;">'+
+          filaB('Ventas de contado', fmtCOP(rm.contado))+
+          filaB('Ventas a crédito', fmtCOP(rm.credito))+
+          filaB('Abonos recibidos', fmtCOP(rm.abonos))+
+          filaB('Dinero recibido', fmtCOP(rm.recibido), null, true)+
+          filaB('Gastos de ruta', '− '+fmtCOP(rm.totalGastos), 'var(--red)')+
+          filaB('Efectivo a entregar', fmtCOP(rm.efectivoNeto), 'var(--green)', true)+
+        '</div>'+
+        (rm.deudores.length ? '<h2 class="section-title">Quedaron debiendo</h2><div class="card" style="padding:10px 14px;">'+
+          rm.deudores.map(function(d){ return filaB(esc(d.cliente)+' <span class="muted">#'+d.numero+'</span>', fmtCOP(d.saldo), 'var(--red)'); }).join('')+'</div>' : '')+
+        '<h2 class="section-title">Productos vendidos · '+rm.unidades+' und</h2><div class="card" style="padding:10px 14px;">'+
+          (rm.productos.length ? rm.productos.map(function(pr){ return filaB('<strong>'+pr.cantidad+'</strong> × '+esc(pr.nombre), fmtCOP(pr.total)); }).join('') : '<div class="small muted">Sin ventas.</div>')+
+        '</div>'+
+        (rm.gastos.length ? '<h2 class="section-title">Gastos</h2><div class="card" style="padding:10px 14px;">'+
+          rm.gastos.map(function(g){ return filaB(esc(g.concepto)+(g.nota?(' <span class="muted">· '+esc(g.nota)+'</span>'):''), fmtCOP(g.monto)); }).join('')+'</div>' : '')+
+        '<a class="btn-wa" style="margin-top:12px;" href="'+esc('https://wa.me/?text='+encodeURIComponent(textoBalance(jm, rm)))+'" target="_blank" rel="noopener">Compartir balance por WhatsApp</a>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Listo</button>';
     } else if(state.modal.type==='cuenta'){
       var perf = state.auth.perfil || {};
       html = '<h3>Mi cuenta</h3>'+
@@ -1833,10 +2005,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       html = '<h3>'+(gEd?'Editar gasto':'Registrar gasto de ruta')+'</h3>'+
         '<div class="field"><label>Concepto</label><input id="mga-concepto" placeholder="Ej: gasolina, peaje, almuerzo" value="'+esc(gEd?gEd.concepto:'')+'"></div>'+
         '<div class="field"><label>Monto</label><input id="mga-monto" type="number" inputmode="numeric" min="0" placeholder="Ej: 15000" value="'+(gEd?esc(gEd.monto):'')+'"></div>'+
+        ((!gEd && miJornada()) ? '<input type="hidden" id="mga-ruta" value="'+esc(miJornada().rutaId)+'"><div class="small muted" style="margin-bottom:10px;">Se anota en la ruta '+esc(miJornada().rutaNombre)+'.</div>' :
         '<div class="field"><label>Ruta (opcional)</label><select id="mga-ruta">'+
           '<option value="">Sin ruta</option>'+
           state.rutas.map(function(r){return '<option value="'+r.id+'"'+(rutaSelG===r.id?' selected':'')+'>'+esc(r.nombre)+'</option>';}).join('')+
-        '</select></div>'+
+        '</select></div>')+
         '<div class="field"><label>Nota (opcional)</label><input id="mga-nota" placeholder="Detalle adicional" value="'+esc(gEd?(gEd.nota||''):'')+'"></div>'+
         '<div class="row" style="margin-top:10px;">'+
           '<button class="btn btn-primary" style="flex:1" data-action="guardar-gasto">'+(gEd?'Guardar cambios':'Registrar gasto')+'</button>'+
@@ -1928,6 +2101,31 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       await signOut(fbAuth);
     }
     else if(action==='abrir-cuenta'){ state.modal = {type:'cuenta'}; render(); }
+    else if(action==='iniciar-ruta'){
+      var rIni = rutaById(id);
+      if(!rIni) return;
+      if(miJornada()){ toast('Ya tienes una ruta abierta'); return; }
+      if(!confirm('¿Iniciar '+rIni.nombre+'?')) return;
+      iniciarRuta(id); render(); window.scrollTo(0,0); toast(rIni.nombre+' iniciada');
+    }
+    else if(action==='cerrar-ruta'){
+      var jc = miJornada(); if(!jc) return;
+      var cartN = Object.values(state.cart).reduce(function(a,b){return a+b;},0);
+      if(!confirm('¿Cerrar '+jc.rutaNombre+'?'+(cartN?('\n\nTienes '+cartN+' producto(s) en un pedido sin facturar; se descartan.'):'')+'\n\nDespués de cerrarla no se pueden agregar ventas a esta ruta.')) return;
+      var cerrada = cerrarJornada(jc);
+      state.modal = {type:'balance-ruta', jornada:cerrada};
+      render();
+    }
+    else if(action==='ver-balance'){
+      var jb = state.jornadas.find(function(j){ return j.id===id; });
+      if(jb){ state.modal = {type:'balance-ruta', jornada:jb}; render(); }
+    }
+    else if(action==='cerrar-ruta-de'){
+      var jo = state.jornadas.find(function(j){ return j.id===id; });
+      if(!jo || jo.estado!=='abierta') return;
+      if(!confirm('¿Cerrar la ruta '+jo.rutaNombre+' de '+(jo.iniciadaPorNombre||'')+'?')) return;
+      state.modal = {type:'balance-ruta', jornada:cerrarJornada(jo)}; render();
+    }
     else if(action==='actualizar-app'){ actualizarApp(); }
     else if(action==='importar-datos'){ var ii = document.getElementById('import-input'); if(ii) ii.click(); }
     else if(action==='filtro-ruta'){ state.selectedRutaId = t.getAttribute('data-ruta'); state.selectedClienteId=null; render(); }
@@ -1960,6 +2158,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='abrir-revisar-factura'){
       if(Object.values(state.cart).reduce(function(a,b){return a+b;},0)===0){ toast('Agrega productos al pedido'); return; }
+      if(!state.editandoVenta && !miJornada()){ toast('Primero inicia la ruta'); return; }
       if(!state.editandoVenta){ state.checkoutPago = 'contado'; state.checkoutAbono = 0; }
       state.modal = {type:'revisar-factura'}; render();
     }
