@@ -229,6 +229,7 @@
     </div>
     <div class="row" style="gap:6px;" id="header-actions">
       <span class="offline-pill" id="offline-pill" style="display:none;">Sin señal</span>
+      <button class="btn btn-sm btn-ghost" data-action="actualizar-app" aria-label="Actualizar" title="Actualizar" style="font-size:17px;padding:5px 10px;">↻</button>
       <button class="btn btn-sm btn-ghost" id="btn-admin" data-action="abrir-cuenta">Cuenta</button>
       <button class="btn btn-sm btn-ghost" data-action="open-ajustes-empresa">Ajustes</button>
     </div>
@@ -326,6 +327,18 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(code==='unavailable') return 'Sin conexión: se guardará cuando vuelva la señal.';
     if(code==='resource-exhausted') return 'Se superó el límite gratuito de hoy. Intenta más tarde.';
     return 'No se pudo guardar' + (code?(' ('+code+')'):'') + '. Intenta de nuevo.';
+  }
+  // Recarga la app trayendo la última versión (lo pendiente por subir queda guardado en el teléfono).
+  async function actualizarApp(){
+    state.modal = null;
+    toast('Actualizando…');
+    try{
+      if('serviceWorker' in navigator){
+        var reg = await navigator.serviceWorker.getRegistration();
+        if(reg) await Promise.race([reg.update(), new Promise(function(r){ setTimeout(r, 3000); })]);
+      }
+    }catch(e){}
+    setTimeout(function(){ location.reload(); }, 300);
   }
   function reportarError(err){ console.error(err); toast(mensajeError(err)); }
   window.addEventListener('unhandledrejection', function(ev){ reportarError(ev.reason||{}); });
@@ -1093,6 +1106,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(state.activeTab==='clientes') main.innerHTML = renderClientes();
     else if(state.activeTab==='historial') main.innerHTML = renderHistorial();
     else if(state.activeTab==='reportes') main.innerHTML = renderReportes();
+    if(state.hayActualizacion){
+      main.insertAdjacentHTML('afterbegin',
+        '<div class="card row between" style="border-color:var(--amber);background:var(--amber-dim);">'+
+          '<div class="small"><strong>Hay una versión nueva de la app.</strong></div>'+
+          '<button class="btn btn-sm btn-primary" data-action="actualizar-app">Actualizar</button>'+
+        '</div>');
+    }
 
     // cart bar
     var cartSlot = document.getElementById('cart-bar-slot');
@@ -1716,6 +1736,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div style="margin-top:8px;"><span class="badge '+(state.isAdmin?'badge-salida':'badge-entrada')+'">'+(state.isAdmin?'Administrador':'Vendedor')+'</span></div>'+
         '</div>'+
         '<div class="small muted" style="margin-bottom:12px;">'+(state.online?'Conectado. Todo está sincronizado.':'Sin señal: lo que registres se guarda en este teléfono y se sube solo cuando vuelva la conexión. No cierres sesión mientras tanto.')+'</div>'+
+        '<button class="btn btn-ghost btn-block" style="margin-bottom:10px;" data-action="actualizar-app">↻ Actualizar app</button>'+
         '<div class="row" style="margin-top:10px;">'+
           '<button class="btn btn-danger" style="flex:1" data-action="auth-salir">Cerrar sesión</button>'+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cerrar</button>'+
@@ -1897,6 +1918,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       await signOut(fbAuth);
     }
     else if(action==='abrir-cuenta'){ state.modal = {type:'cuenta'}; render(); }
+    else if(action==='actualizar-app'){ actualizarApp(); }
     else if(action==='importar-datos'){ var ii = document.getElementById('import-input'); if(ii) ii.click(); }
     else if(action==='filtro-ruta'){ state.selectedRutaId = t.getAttribute('data-ruta'); state.selectedClienteId=null; render(); }
     else if(action==='filtro-hist'){ state.histFiltro = t.getAttribute('data-f'); render(); }
@@ -2201,7 +2223,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   });
 
   if('serviceWorker' in navigator && !USE_EMULATORS){
-    window.addEventListener('load', function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); });
+    window.addEventListener('load', function(){
+      var teniaVersion = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.register('sw.js').then(function(reg){
+        reg.addEventListener('updatefound', function(){
+          var w = reg.installing; if(!w) return;
+          w.addEventListener('statechange', function(){
+            if(w.state==='activated' && teniaVersion){ state.hayActualizacion = true; render(); }
+          });
+        });
+        // busca versiones nuevas cada 30 minutos y al volver a la app
+        setInterval(function(){ reg.update().catch(function(){}); }, 30*60*1000);
+        document.addEventListener('visibilitychange', function(){ if(!document.hidden) reg.update().catch(function(){}); });
+      }).catch(function(){});
+    });
   }
   render();
 })();
