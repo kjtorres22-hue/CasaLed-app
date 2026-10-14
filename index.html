@@ -260,6 +260,7 @@
 </div>
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
+import { generarFacturaPDF } from './factura-pdf.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -529,6 +530,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     render();
   }
 
+  var EMPRESA_DEFAULT = {
+    empresaNombre:'Casa LED', empresaNit:'1.121.914.622', empresaDireccion:'Cl 3 sur #30b-30',
+    empresaCiudad:'Villavicencio, Meta', empresaTelefono:'311 409 3721', empresaEmail:'casaledvillao@gmail.com',
+    empresaInstagram:'@Casaledvillao', empresaWeb:'casaled.co',
+    notasFactura:'1) El cliente debe revisar que cada artículo corresponda a lo indicado en su pedido.\n2) Para hacer válida la garantía, conserve esta factura.'
+  };
+  // Datos de la empresa: lo guardado en Ajustes, y si falta algo, los valores por defecto.
+  function cfgEmpresa(){
+    var c = state.config || {}; var r = {};
+    Object.keys(EMPRESA_DEFAULT).forEach(function(k){ r[k] = (c[k]!=null && String(c[k]).trim()!=='') ? c[k] : EMPRESA_DEFAULT[k]; });
+    r.contadorFactura = c.contadorFactura || 0;
+    return r;
+  }
+
   function nombreUsuario(){
     var p = state.auth.perfil; var u = state.auth.user;
     return (p && p.nombre) || (u && u.email) || '';
@@ -638,10 +653,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     enSegundoPlano(b.commit());
   }
   async function crearCliente(data){
-    await db.collection('clientes').add({
-      nombre:data.nombre, telefono:data.telefono, direccion:data.direccion, rutaId:data.rutaId||null,
-      creadoEn:todayISO()
-    });
+    var doc = {
+      nombre:data.nombre, telefono:data.telefono||'', direccion:data.direccion||'', rutaId:data.rutaId||null,
+      documento:data.documento||'', ciudad:data.ciudad||'', creadoEn:todayISO()
+    };
+    var ref = await db.collection('clientes').add(doc);
+    return Object.assign({id:ref.id}, doc);
   }
   async function editarCliente(id, data){
     await db.doc('clientes/'+id).update(data);
@@ -693,15 +710,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     return { numero:n, reservado:false };
   }
 
-  async function confirmarVenta(){
+  async function confirmarVenta(clienteDirecto){
     var items = buildCartItems();
     if(items.length===0){ toast('Agrega productos al pedido'); return; }
-    var cliente = clienteById(state.selectedClienteId);
-    if(!cliente){ toast('Selecciona un cliente'); return; }
+    var cliente = clienteDirecto || clienteById(state.selectedClienteId);
+    if(!cliente){ toast('Elige o crea el cliente'); return; }
     if(state.ventaEnCurso) return;
     state.ventaEnCurso = true;
     var total = items.reduce(function(s,it){return s+it.subtotal;},0);
-    var cfg = state.config || {contadorFactura:0, empresaNombre:'Casa LED'};
+    var cfg = cfgEmpresa();
     var ruta = rutaById(cliente.rutaId);
     var tipoPago = state.checkoutPago || 'contado';
     var abono = tipoPago==='credito' ? Math.max(0, Math.min(total, Number(state.checkoutAbono)||0)) : total;
@@ -711,17 +728,19 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var reserva = await siguienteNumeroFactura();
       var numero = reserva.numero;
       var b = writeBatch(fs);
+      var ventaDoc;
       if(!reserva.reservado){
         b.set(doc(fs,'config/general'), {contadorFactura: increment(1)}, {merge:true});
       }
       var ventaRef = doc(collection(fs,'ventas'));
       var fecha = todayISO();
-      b.set(ventaRef, {
+      ventaDoc = {
         numero:numero, clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
         rutaId:cliente.rutaId||null, rutaNombre:ruta?ruta.nombre:'', items:items, total:total,
         tipoPago:tipoPago, abono:abono, saldo:saldo, fecha:fecha,
         vendedorId:state.auth.user.uid, vendedorNombre:nombreUsuario()
-      });
+      };
+      b.set(ventaRef, ventaDoc);
       // un solo update por producto, sumando todos los colores del pedido
       var porProducto = {};
       items.forEach(function(it){
@@ -750,13 +769,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       });
       enSegundoPlano(b.commit());
 
-      var texto = textoFactura(numero, cliente, items, total, cfg, {tipo:tipoPago, abono:abono});
       state.cart = {};
       state.selectedClienteId = null;
       state.checkoutPago = 'contado';
       state.checkoutAbono = 0;
-      state.modal = { type:'factura-lista', numero:numero, url:urlWhatsapp(cliente.telefono, texto), clienteNombre:cliente.nombre, offline:!navigator.onLine };
-      render();
+      abrirFactura(Object.assign({id:ventaRef.id}, ventaDoc), cliente, true);
     }catch(e){
       reportarError(e);
     }finally{
@@ -820,6 +837,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var lineas = [];
     lineas.push(SEP);
     lineas.push('*'+(cfg.empresaNombre||'Casa LED')+'*');
+    if(cfg.empresaNit) lineas.push('NIT: '+cfg.empresaNit);
     if(cfg.empresaTelefono) lineas.push('Tel: '+cfg.empresaTelefono);
     if(cfg.empresaDireccion) lineas.push(cfg.empresaDireccion);
     lineas.push(SEP);
@@ -854,6 +872,65 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var tel = (telefono||'').replace(/[^0-9]/g,'');
     return 'https://wa.me/' + (tel?('57'+tel.replace(/^57/,'')): '') + '?text=' + encodeURIComponent(texto);
   }
+  function mensajeWhatsapp(venta, cliente){
+    var e = cfgEmpresa();
+    var lineas = [
+      'Hola '+(cliente.nombre||'')+' 👋',
+      'Te envío la *factura N.° '+venta.numero+'* de *'+e.empresaNombre+'* por *'+fmtCOP(venta.total)+'*.'
+    ];
+    if(venta.tipoPago==='credito'){
+      lineas.push('Abono: '+fmtCOP(venta.abono)+' · Saldo pendiente: *'+fmtCOP(venta.saldo)+'*');
+    }
+    lineas.push('¡Gracias por tu compra!');
+    return lineas.join('\n');
+  }
+  function datosPdf(venta, cliente){
+    var e = cfgEmpresa();
+    return {
+      empresa: { nombre:e.empresaNombre, nit:e.empresaNit, direccion:e.empresaDireccion, ciudad:e.empresaCiudad,
+        telefono:e.empresaTelefono, email:e.empresaEmail, instagram:e.empresaInstagram, web:e.empresaWeb, notas:e.notasFactura },
+      logoUrl: 'icons/icon-512.png',
+      venta: venta,
+      cliente: { nombre:cliente.nombre, documento:cliente.documento||'', direccion:cliente.direccion||'', ciudad:cliente.ciudad||'', telefono:cliente.telefono||'' },
+      items: (venta.items||[]).map(function(it){
+        var p = productoById(it.productoId);
+        return { nombre:it.nombre, cantidad:it.cantidad, precio:it.precio, subtotal:it.subtotal, imagenUrl: p && p.imagenUrl ? p.imagenUrl : null };
+      })
+    };
+  }
+  // Abre la ventana de la factura y prepara el PDF en segundo plano (para compartirlo con un solo toque).
+  function abrirFactura(venta, cliente, nueva){
+    cliente = cliente || clienteById(venta.clienteId) || {nombre:venta.clienteNombre, telefono:venta.clienteTelefono};
+    var m = { type:'factura-lista', venta:venta, cliente:cliente, nueva:!!nueva, offline:!navigator.onLine, pdf:null, pdfError:false };
+    state.modal = m;
+    render();
+    generarFacturaPDF(datosPdf(venta, cliente)).then(function(blob){
+      m.pdf = new File([blob], 'Factura-'+venta.numero+'-CasaLED.pdf', {type:'application/pdf'});
+      if(state.modal===m) render();
+    }).catch(function(err){
+      console.error(err); m.pdfError = true;
+      if(state.modal===m) render();
+    });
+  }
+  function descargarArchivo(file){
+    var url = URL.createObjectURL(file);
+    var a = document.createElement('a');
+    a.href = url; a.download = file.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+  }
+  function compartirPdf(){
+    var f = state.modal && state.modal.pdf;
+    if(!f){ toast('Preparando el PDF, espera un segundo…'); return; }
+    if(navigator.canShare && navigator.share && navigator.canShare({files:[f]})){
+      navigator.share({files:[f], title:f.name}).catch(function(err){
+        if(err && err.name!=='AbortError') descargarArchivo(f);
+      });
+    } else {
+      descargarArchivo(f);
+    }
+  }
+
   function enviarFacturaWhatsapp(numero, cliente, items, total, cfg, pago){
     var texto = textoFactura(numero, cliente, items, total, cfg, pago);
     window.open(urlWhatsapp(cliente.telefono, texto), '_blank');
@@ -1014,7 +1091,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var clienteSel = clienteById(state.selectedClienteId);
     var clienteHtml = '<div class="card">'+
-      '<label>Cliente</label>'+
+      '<label>Cliente (opcional, también lo puedes elegir o crear al final)</label>'+
       '<select id="sel-cliente">'+
         '<option value="">Selecciona un cliente…</option>'+
         clientesFiltrados.map(function(c){
@@ -1372,7 +1449,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div><span class="product-name">Factura #'+v.numero+'</span>'+(v.tipoPago==='credito'?' <span class="badge" style="background:rgba(248,113,113,.15);color:var(--red);">Crédito'+(v.saldo>0?(' · Saldo '+fmtCOP(v.saldo)):' · Pagado')+'</span>':'')+'<div class="small muted">'+esc(v.clienteNombre)+' · '+fmtFecha(v.fecha)+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;">'+fmtCOP(v.total)+'</span>'+
-          '<button class="btn btn-sm btn-ghost" data-action="reenviar-factura" data-id="'+v.id+'">WhatsApp</button>'+
+          '<button class="btn btn-sm btn-ghost" data-action="ver-factura" data-id="'+v.id+'">Factura</button>'+
         '</div>'+
       '</div></div>';
     }).join('') : '<div class="empty">No hay facturas todavía.</div>';
@@ -1411,11 +1488,29 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<h2 class="section-title">Datos de la empresa</h2>'+
       (state.isAdmin ? '' : '<div class="small muted" style="margin-bottom:10px;">🔒 Solo el administrador puede editar estos datos.</div>')+
       '<div class="card">'+
-        '<div class="field"><label>Nombre</label><input id="cfg-nombre" value="'+esc(state.config?state.config.empresaNombre:'')+'" '+(state.isAdmin?'':'disabled')+'></div>'+
-        '<div class="field"><label>Teléfono</label><input id="cfg-telefono" value="'+esc(state.config?state.config.empresaTelefono:'')+'" '+(state.isAdmin?'':'disabled')+'></div>'+
-        '<div class="field"><label>Dirección</label><input id="cfg-direccion" value="'+esc(state.config?state.config.empresaDireccion:'')+'" '+(state.isAdmin?'':'disabled')+'></div>'+
+        (function(){
+          var e = cfgEmpresa(); var dis = state.isAdmin ? '' : 'disabled';
+          var campo = function(id, etq, val, extra){ return '<div class="field"><label>'+etq+'</label><input id="'+id+'" value="'+esc(val)+'" '+dis+' '+(extra||'')+'></div>'; };
+          return campo('cfg-nombre','Nombre',e.empresaNombre)+
+            campo('cfg-nit','NIT',e.empresaNit,'inputmode="numeric"')+
+            campo('cfg-direccion','Dirección',e.empresaDireccion)+
+            campo('cfg-ciudad','Ciudad',e.empresaCiudad)+
+            campo('cfg-telefono','Teléfono / WhatsApp',e.empresaTelefono,'inputmode="tel"')+
+            campo('cfg-email','Correo',e.empresaEmail,'inputmode="email"')+
+            campo('cfg-instagram','Instagram',e.empresaInstagram)+
+            campo('cfg-web','Página web',e.empresaWeb)+
+            '<div class="field"><label>Notas al pie de la factura</label><textarea id="cfg-notas" rows="3" '+dis+'>'+esc(e.notasFactura)+'</textarea></div>';
+        })()+
         '<button class="btn btn-primary btn-block" data-action="guardar-empresa">Guardar</button>'+
       '</div>';
+  }
+
+  function clienteCheckout(){
+    if(state.modal && state.modal.crearCliente){
+      var nc = state.modal.nc || {};
+      return { nombre: nc.nombre || '(cliente nuevo)', telefono: nc.telefono||'', direccion: nc.direccion||'' };
+    }
+    return clienteById(state.selectedClienteId) || {nombre:'(elige el cliente)'};
   }
 
   // ---------- MODALES ----------
@@ -1427,12 +1522,44 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(state.modal.type==='revisar-factura'){
       var itemsRF = buildCartItems();
       var totalRF = itemsRF.reduce(function(s,it){return s+it.subtotal;},0);
-      var clienteRF = clienteById(state.selectedClienteId) || {nombre:'(sin cliente)'};
-      var cfgRF = state.config || {empresaNombre:'Casa LED'};
+      var clienteRF = clienteCheckout();
+      var cfgRF = cfgEmpresa();
       var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF};
       var saldoRF = Math.max(0, totalRF - (pagoRF.abono||0));
       var previewTexto = textoFactura('(sin asignar)', clienteRF, itemsRF, totalRF, cfgRF, pagoRF);
+      var nc = state.modal.nc || {};
+      var bloqueCliente = state.modal.crearCliente ?
+        ('<div class="card" style="padding:12px;margin-bottom:12px;">'+
+          '<div class="row between" style="margin-bottom:8px;"><strong class="small">Cliente nuevo</strong>'+
+          '<button class="link-btn" data-action="rf-elegir-existente">Elegir uno existente</button></div>'+
+          '<div class="field"><label>Nombre *</label><input id="rf-nc-nombre" value="'+esc(nc.nombre||'')+'"></div>'+
+          '<div class="field"><label>Teléfono (WhatsApp)</label><input id="rf-nc-telefono" inputmode="tel" value="'+esc(nc.telefono||'')+'" placeholder="Ej: 3001234567"></div>'+
+          '<div class="field-row">'+
+            '<div class="field"><label>NIT / CC</label><input id="rf-nc-documento" inputmode="numeric" value="'+esc(nc.documento||'')+'"></div>'+
+            '<div class="field"><label>Ciudad</label><input id="rf-nc-ciudad" value="'+esc(nc.ciudad||'')+'"></div>'+
+          '</div>'+
+          '<div class="field"><label>Dirección</label><input id="rf-nc-direccion" value="'+esc(nc.direccion||'')+'"></div>'+
+          '<div class="field" style="margin-bottom:0;"><label>Ruta</label><select id="rf-nc-rutaId">'+
+            '<option value="">Sin ruta</option>'+
+            state.rutas.map(function(r){ var sel = (nc.rutaId!=null ? nc.rutaId===r.id : state.selectedRutaId===r.id); return '<option value="'+r.id+'"'+(sel?' selected':'')+'>'+esc(r.nombre)+'</option>'; }).join('')+
+          '</select></div>'+
+        '</div>')
+        :
+        ('<div class="field"><div class="row between"><label style="margin:0 0 5px 2px;">Cliente *</label>'+
+          '<button class="link-btn" data-action="rf-crear-cliente">+ Crear cliente nuevo</button></div>'+
+          '<select id="rf-cliente">'+
+            '<option value="">Elige el cliente…</option>'+
+            state.clientes.slice().sort(function(a,b){
+              var ra = (state.selectedRutaId!=='__todas__' && a.rutaId===state.selectedRutaId)?0:1;
+              var rb = (state.selectedRutaId!=='__todas__' && b.rutaId===state.selectedRutaId)?0:1;
+              return ra-rb || String(a.nombre).localeCompare(String(b.nombre));
+            }).map(function(c){
+              var ru = rutaById(c.rutaId);
+              return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+(ru?(' · '+esc(ru.nombre)):'')+'</option>';
+            }).join('')+
+          '</select></div>');
       html = '<h3>Revisar factura</h3>'+
+        bloqueCliente+
         '<label>Forma de pago</label>'+
         '<div class="chips" style="margin-bottom:10px;">'+
           '<button class="chip'+(state.checkoutPago!=='credito'?' active':'')+'" data-action="set-tipo-pago" data-tipo="contado">Contado</button>'+
@@ -1462,10 +1589,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cerrar</button>'+
         '</div>';
     } else if(state.modal.type==='factura-lista'){
-      html = '<h3>Factura #'+state.modal.numero+' registrada</h3>'+
-        '<div class="small muted" style="margin-bottom:14px;">Venta a '+esc(state.modal.clienteNombre)+(state.modal.offline?' · guardada en el teléfono, se sube cuando haya señal':'')+'.</div>'+
-        '<a class="btn-wa" href="'+esc(state.modal.url)+'" target="_blank" rel="noopener">Enviar factura por WhatsApp</a>'+
-        '<button class="btn btn-ghost btn-block" style="margin-top:10px;" data-action="cerrar-modal">Listo</button>';
+      var mv = state.modal.venta, mc = state.modal.cliente;
+      var tel = (mc.telefono||'').replace(/[^0-9]/g,'');
+      html = '<h3>Factura #'+mv.numero+(state.modal.nueva?' registrada':'')+'</h3>'+
+        '<div class="small muted" style="margin-bottom:14px;">'+esc(mc.nombre||'')+' · '+fmtCOP(mv.total)+
+          (mv.tipoPago==='credito'?(' · Crédito, saldo '+fmtCOP(mv.saldo)):' · Contado')+
+          (state.modal.offline?' · guardada en el teléfono, se sube cuando haya señal':'')+'</div>'+
+        (tel ?
+          '<a class="btn-wa" href="'+esc(urlWhatsapp(mc.telefono, mensajeWhatsapp(mv, mc)))+'" target="_blank" rel="noopener">1. Abrir chat de '+esc((mc.nombre||'').split(' ')[0])+' en WhatsApp</a>'
+          : '<div class="small" style="color:var(--red);margin-bottom:6px;">Este cliente no tiene teléfono guardado. Comparte el PDF y elige el chat a mano.</div>')+
+        '<button class="btn btn-primary btn-block" style="margin-top:10px;padding:13px;" data-action="compartir-pdf" '+(state.modal.pdf?'':'disabled')+'>'+
+          (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
+        '</button>'+
+        '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="cerrar-modal">Listo</button>';
     } else if(state.modal.type==='nuevo-producto' || state.modal.type==='editar-producto'){
       var p = state.modal.producto || {};
       html = '<h3>'+(state.modal.type==='editar-producto'?'Editar producto':'Nuevo producto')+'</h3>'+
@@ -1541,6 +1678,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div class="field"><label>Nombre</label><input id="mc-nombre" value="'+esc(c.nombre||'')+'"></div>'+
         '<div class="field"><label>Teléfono (WhatsApp)</label><input id="mc-telefono" value="'+esc(c.telefono||'')+'" placeholder="Ej: 3001234567"></div>'+
         '<div class="field"><label>Dirección</label><input id="mc-direccion" value="'+esc(c.direccion||'')+'"></div>'+
+        '<div class="field-row">'+
+          '<div class="field"><label>NIT / CC (opcional)</label><input id="mc-documento" inputmode="numeric" value="'+esc(c.documento||'')+'"></div>'+
+          '<div class="field"><label>Ciudad (opcional)</label><input id="mc-ciudad" value="'+esc(c.ciudad||'')+'"></div>'+
+        '</div>'+
         '<div class="field"><label>Ruta</label><select id="mc-ruta">'+
           '<option value="">Sin ruta</option>'+
           state.rutas.map(function(r){return '<option value="'+r.id+'"'+(c.rutaId===r.id?' selected':'')+'>'+esc(r.nombre)+'</option>';}).join('')+
@@ -1648,16 +1789,34 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='abrir-revisar-factura'){
       if(Object.values(state.cart).reduce(function(a,b){return a+b;},0)===0){ toast('Agrega productos al pedido'); return; }
-      if(!state.selectedClienteId){ toast('Selecciona un cliente'); return; }
       state.checkoutPago = 'contado'; state.checkoutAbono = 0;
       state.modal = {type:'revisar-factura'}; render();
+    }
+    else if(action==='rf-crear-cliente'){ state.modal.crearCliente = true; state.modal.nc = state.modal.nc || {}; render(); }
+    else if(action==='rf-elegir-existente'){ state.modal.crearCliente = false; render(); }
+    else if(action==='compartir-pdf'){ compartirPdf(); }
+    else if(action==='ver-factura'){
+      var vf = state.ventas.find(function(v){ return v.id===id; });
+      if(vf) abrirFactura(vf, null, false);
     }
     else if(action==='set-tipo-pago'){
       state.checkoutPago = t.getAttribute('data-tipo');
       if(state.checkoutPago!=='credito') state.checkoutAbono = 0;
       render();
     }
-    else if(action==='confirmar-venta'){ await confirmarVenta(); }
+    else if(action==='confirmar-venta'){
+      var clienteVenta = null;
+      if(state.modal && state.modal.crearCliente){
+        var ncv = state.modal.nc || {};
+        if(!(ncv.nombre||'').trim()){ toast('Escribe el nombre del cliente nuevo'); return; }
+        clienteVenta = await crearCliente({
+          nombre:ncv.nombre.trim(), telefono:(ncv.telefono||'').trim(), direccion:(ncv.direccion||'').trim(),
+          documento:(ncv.documento||'').trim(), ciudad:(ncv.ciudad||'').trim(),
+          rutaId: ncv.rutaId!=null ? (ncv.rutaId||null) : (state.selectedRutaId!=='__todas__' ? state.selectedRutaId : null)
+        });
+      } else if(!state.selectedClienteId){ toast('Elige el cliente o crea uno nuevo'); return; }
+      await confirmarVenta(clienteVenta);
+    }
     else if(action==='abrir-nuevo-producto'){ state.modal={type:'nuevo-producto'}; render(); }
     else if(action==='abrir-editar-producto'){ state.modal={type:'editar-producto', producto:productoById(id)}; render(); }
     else if(action==='abrir-entrada'){ state.modal={type:'entrada', productoId:id}; render(); }
@@ -1748,11 +1907,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var telC = document.getElementById('mc-telefono').value.trim();
       var dirC = document.getElementById('mc-direccion').value.trim();
       var rutaC = document.getElementById('mc-ruta').value;
+      var docC = document.getElementById('mc-documento').value.trim();
+      var ciuC = document.getElementById('mc-ciudad').value.trim();
       if(!nombreC){ toast('El nombre es obligatorio'); return; }
       if(state.modal.type==='editar-cliente'){
-        await editarCliente(state.modal.cliente.id, {nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null});
+        await editarCliente(state.modal.cliente.id, {nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC});
       } else {
-        await crearCliente({nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null});
+        await crearCliente({nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC});
       }
       state.modal=null; render(); toast('Cliente guardado');
     }
@@ -1773,16 +1934,22 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(venta) reenviarFactura(venta);
     }
     else if(action==='guardar-empresa'){
+      var valCfg = function(id){ return document.getElementById(id).value.trim(); };
       await guardarEmpresa({
-        empresaNombre: document.getElementById('cfg-nombre').value,
-        empresaTelefono: document.getElementById('cfg-telefono').value,
-        empresaDireccion: document.getElementById('cfg-direccion').value
+        empresaNombre: valCfg('cfg-nombre'), empresaNit: valCfg('cfg-nit'), empresaDireccion: valCfg('cfg-direccion'),
+        empresaCiudad: valCfg('cfg-ciudad'), empresaTelefono: valCfg('cfg-telefono'), empresaEmail: valCfg('cfg-email'),
+        empresaInstagram: valCfg('cfg-instagram'), empresaWeb: valCfg('cfg-web'), notasFactura: document.getElementById('cfg-notas').value
       });
       toast('Datos de la empresa guardados');
     }
   });
 
   document.addEventListener('input', function(e){
+    if(e.target.id && e.target.id.indexOf('rf-nc-')===0 && state.modal){
+      state.modal.nc = state.modal.nc || {};
+      state.modal.nc[e.target.id.slice(6)] = e.target.value;
+      return;
+    }
     if(e.target.id==='rf-abono'){
       var total = Number(e.target.getAttribute('data-total'))||0;
       var abono = Math.max(0, Math.min(total, Number(e.target.value)||0));
@@ -1790,8 +1957,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var saldoEl = document.getElementById('rf-saldo');
       if(saldoEl) saldoEl.textContent = fmtCOP(Math.max(0,total-abono));
       var itemsRF = buildCartItems();
-      var clienteRF = clienteById(state.selectedClienteId) || {nombre:'(sin cliente)'};
-      var cfgRF = state.config || {empresaNombre:'Casa LED'};
+      var clienteRF = clienteCheckout();
+      var cfgRF = cfgEmpresa();
       var previewEl = document.getElementById('rf-preview');
       if(previewEl) previewEl.textContent = textoFactura('(sin asignar)', clienteRF, itemsRF, total, cfgRF, {tipo:'credito', abono:abono});
     }
@@ -1801,6 +1968,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(e.target.id==='sel-cliente'){
       state.selectedClienteId = e.target.value || null;
       render();
+    }
+    else if(e.target.id==='rf-cliente'){
+      state.selectedClienteId = e.target.value || null;
+      render();
+    }
+    else if(e.target.id==='rf-nc-rutaId' && state.modal){
+      state.modal.nc = state.modal.nc || {};
+      state.modal.nc.rutaId = e.target.value;
     }
     else if(e.target.id==='mg-producto'){
       state.modal.selectedProductoId = e.target.value;
