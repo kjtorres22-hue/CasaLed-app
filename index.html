@@ -313,7 +313,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','guardar-codigo-edicion'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -556,14 +556,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     r.contadorFactura = c.contadorFactura || 0;
     return r;
   }
-
-  // Código para editar facturas: se guarda solo su huella (SHA-256), nunca el número en claro.
-  var HASH_CODIGO_DEFAULT = '8dcee220c97cd8a5a25cf27fb2ae03d1ee7fba31595361322c1db4b0e6915240';
-  async function sha256Hex(texto){
-    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(texto));
-    return Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
-  }
-  function hashCodigoEdicion(){ return (state.config && state.config.codigoEdicionHash) || HASH_CODIGO_DEFAULT; }
 
   function nombreUsuario(){
     var p = state.auth.perfil; var u = state.auth.user;
@@ -1581,9 +1573,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div class="field"><label>Próxima factura N.°</label><input id="cfg-proxima" type="number" inputmode="numeric" min="1" value="'+((Number(state.config && state.config.contadorFactura)||0)+1)+'"></div>'+
         '<button class="btn btn-primary btn-block" data-action="guardar-numeracion">Guardar numeración</button>'+
         '<div class="small muted" style="margin-top:8px;">Las facturas siguen contando desde este número.</div>'+
-        '<div class="divider"></div>'+
-        '<div class="field"><label>Nuevo código para editar facturas (6 dígitos)</label><input id="cfg-codigo" type="password" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="••••••"></div>'+
-        '<button class="btn btn-ghost btn-block" data-action="guardar-codigo-edicion">Cambiar código</button>'+
       '</div>') : '')+
       '<h2 class="section-title">Datos de la empresa</h2>'+
       (state.isAdmin ? '' : '<div class="small muted" style="margin-bottom:10px;">🔒 Solo el administrador puede editar estos datos.</div>')+
@@ -1677,15 +1666,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
             : '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Confirmar venta</button>')+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>';
-    } else if(state.modal.type==='codigo-edicion'){
-      html = '<h3>Editar factura #'+state.modal.venta.numero+'</h3>'+
-        '<div class="small muted" style="margin-bottom:12px;">Escribe el código de 6 dígitos para editar facturas.</div>'+
-        '<div class="field"><input id="ce-codigo" type="password" inputmode="numeric" maxlength="6" autocomplete="off" style="font-size:22px;letter-spacing:8px;text-align:center;"></div>'+
-        (state.modal.error ? '<div class="small" style="color:var(--red);margin-bottom:8px;">'+esc(state.modal.error)+'</div>' : '')+
-        '<div class="row" style="margin-top:10px;">'+
-          '<button class="btn btn-primary" style="flex:1" data-action="verificar-codigo-edicion">Continuar</button>'+
-          '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
-        '</div>';
     } else if(state.modal.type==='cuenta'){
       var perf = state.auth.perfil || {};
       html = '<h3>Mi cuenta</h3>'+
@@ -1713,7 +1693,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
         '</button>'+
         '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
-        (mv.id ? '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="editar-factura">✏️ Editar factura</button>' : '')+
+        (state.isAdmin && mv.id ? '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="editar-factura">✏️ Editar factura</button>' : '')+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Listo</button>';
     } else if(state.modal.type==='nuevo-producto' || state.modal.type==='editar-producto'){
       var p = state.modal.producto || {};
@@ -1908,17 +1888,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='rf-elegir-existente'){ state.modal.crearCliente = false; render(); }
     else if(action==='compartir-pdf'){ compartirPdf(); }
     else if(action==='editar-factura'){
-      var vEd = state.modal && state.modal.venta;
-      if(!vEd || !vEd.id) return;
-      state.modal = { type:'codigo-edicion', venta:vEd, error:'' };
-      render();
-      setTimeout(function(){ var ic = document.getElementById('ce-codigo'); if(ic) ic.focus(); }, 50);
-    }
-    else if(action==='verificar-codigo-edicion'){
-      var codigoIn = (document.getElementById('ce-codigo').value||'').trim();
-      var hIn = await sha256Hex(codigoIn);
-      if(hIn !== hashCodigoEdicion()){ state.modal.error = 'Código incorrecto'; render(); return; }
-      var ve = state.modal.venta;
+      var ve = state.modal && state.modal.venta;
+      if(!ve || !ve.id) return;
       state.editandoVenta = ve;
       state.cart = {};
       (ve.items||[]).forEach(function(it){ var k = claveItem(it); state.cart[k] = (state.cart[k]||0) + (Number(it.cantidad)||0); });
@@ -1933,13 +1904,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
       state.checkoutPago = 'contado'; state.checkoutAbono = 0;
       render(); toast('Edición cancelada');
-    }
-    else if(action==='guardar-codigo-edicion'){
-      var nuevoCod = (document.getElementById('cfg-codigo').value||'').trim();
-      if(!/^[0-9]{6}$/.test(nuevoCod)){ toast('El código debe tener 6 dígitos'); return; }
-      await guardarEmpresa({codigoEdicionHash: await sha256Hex(nuevoCod)});
-      document.getElementById('cfg-codigo').value = '';
-      toast('Código para editar facturas actualizado');
     }
     else if(action==='guardar-numeracion'){
       var prox = parseInt(document.getElementById('cfg-proxima').value, 10);
@@ -2096,12 +2060,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         empresaInstagram: valCfg('cfg-instagram'), empresaWeb: valCfg('cfg-web'), notasFactura: document.getElementById('cfg-notas').value
       });
       toast('Datos de la empresa guardados');
-    }
-  });
-
-  document.addEventListener('keydown', function(e){
-    if(e.key==='Enter' && e.target && e.target.id==='ce-codigo'){
-      var btn = document.querySelector('[data-action="verificar-codigo-edicion"]'); if(btn) btn.click();
     }
   });
 
