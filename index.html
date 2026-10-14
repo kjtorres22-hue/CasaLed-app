@@ -528,6 +528,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     db.collection('productos').orderBy('orden').onSnapshot(function(snap){
       state.productos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render({preservar:true});
+      aplicarMigraciones();
     });
     db.collection('clientes').orderBy('nombre').onSnapshot(function(snap){
       state.clientes = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
@@ -552,6 +553,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     db.doc('config/general').onSnapshot(function(snap){
       state.config = snap.exists ? snap.data() : null;
       render({preservar:true});
+      aplicarMigraciones();
     });
     db.collection('jornadas').orderBy('iniciadaEn','desc').limit(60).onSnapshot(function(snap){
       state.jornadas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
@@ -675,6 +677,42 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     Object.keys(EMPRESA_DEFAULT).forEach(function(k){ r[k] = (c[k]!=null && String(c[k]).trim()!=='') ? c[k] : EMPRESA_DEFAULT[k]; });
     r.contadorFactura = c.contadorFactura || 0;
     return r;
+  }
+
+  // ---------- ACTUALIZACIONES DE DATOS (se aplican una sola vez desde la cuenta admin) ----------
+  // Costo de compra según factura Moto Fox N.° 39072 (05/10/2026, precios con IVA).
+  // T10 se vende en paquete x10: el costo por paquete es 10 × precio unitario.
+  var MIGRACIONES = [
+    { id:'costos_motofox_39072', mensaje:'Costos de compra actualizados (factura Moto Fox 39072)', costos:{
+      'motoled-6000lm':27200, 'motoled-8000lm':30600, 'ceramico-h4-triceta':7225,
+      'direccional-flash-naranja':1955, 'direccional-flash-blanco':1955,
+      'motoled-16000lm':37400, 'mi45-10000lm-par':91800, 'ceramico-ba20d':7225,
+      'stop-flash':2550, 'stop-flash-blanco':2550,
+      't10-fijo-unicolor':8500, 't10-flash-unicolor':12750,
+      'ceramico-p15-6-10w':5950, 'cargador-usb-doble':10625,
+      'correa-bws':30770, 'correa-agility':28645, 't10-rgb-multifuncion':6800,
+      'direccional-tipo-hoja':5100, 'direccional-flecha-mini':5100, 'direccional-lineal-fija':5950,
+      'direccional-lineal-secuencial':6375, 'direccional-ojo-aguila':5950
+    }}
+  ];
+  var migrando = false;
+  function aplicarMigraciones(){
+    if(migrando || !state.isAdmin || !state.config || !state.productos.length) return;
+    var hechas = state.config.migraciones || {};
+    var pendientes = MIGRACIONES.filter(function(m){ return !hechas[m.id]; });
+    if(!pendientes.length) return;
+    migrando = true;
+    var b = writeBatch(fs); var n = 0; var marcas = {};
+    pendientes.forEach(function(m){
+      Object.keys(m.costos||{}).forEach(function(pid){
+        if(productoById(pid)){ b.update(doc(fs, 'productos/'+pid), {costoCompra:m.costos[pid]}); n++; }
+      });
+      marcas['migraciones.'+m.id] = todayISO();
+    });
+    b.update(doc(fs, 'config/general'), marcas);
+    b.commit().then(function(){
+      toast(pendientes.map(function(m){ return m.mensaje; }).join(' · ')+' · '+n+' productos');
+    }).catch(function(e){ migrando = false; reportarError(e); });
   }
 
   function nombreUsuario(){
