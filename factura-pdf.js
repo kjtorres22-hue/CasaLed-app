@@ -280,7 +280,7 @@ export async function generarFacturaPDF(datos){
   y = cajaCliente(y);
   y = cabeceraTabla(y);
 
-  const FILA = 36, LIMITE = PAGE_H - 44;
+  const FILA = 34, LIMITE = PAGE_H - 44;
   items.forEach((it, i) => {
     if(y + FILA > LIMITE){
       pie(); pdf.addPage(); pagina++;
@@ -289,8 +289,8 @@ export async function generarFacturaPDF(datos){
     if(i % 2 === 1){ pdf.fill(ZEBRA); pdf.rect(M, y, ANCHO, FILA, 'f'); }
     pdf.stroke(LINEA); pdf.lineWidth(0.5); pdf.line(M, y + FILA, M + ANCHO, y + FILA);
     if(fotos[i]){
-      pdf.fill(BLANCO); pdf.stroke(LINEA); pdf.rect(C[0].x + 11, y + 3, 32, 30, 'B');
-      pdf.imageFit(fotos[i], C[0].x + 12, y + 4, 30, 28);
+      pdf.fill(BLANCO); pdf.stroke(LINEA); pdf.rect(C[0].x + 12, y + 3, 30, 28, 'B');
+      pdf.imageFit(fotos[i], C[0].x + 13, y + 4, 28, 26);
     }
     const lineas = pdf.envolver(it.nombre, C[1].w - 16, 9.5, true, 2);
     const yTxt = y + FILA / 2 - (lineas.length - 1) * 5.5 + 3.5;
@@ -332,8 +332,24 @@ export async function generarFacturaPDF(datos){
   pdf.text(credito ? 'CRÉDITO' : 'CONTADO · PAGADO', M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
   pdf.text(items.length + ' referencia(s) · ' + unidades + ' unidad(es)', M + 10, y + 50, { size: 9, color: GRIS });
 
+  let yN = Math.max(yT, y + 60) + 10;
+
+  // Comentarios del vendedor
+  const comentarios = String(v.comentarios || '').trim();
+  if(comentarios){
+    const lineasC = [];
+    comentarios.split(/\n+/).forEach((parrafo) => pdf.envolver(parrafo, ANCHO - 24, 9.5, false).forEach((l) => lineasC.push(l)));
+    const hC = 22 + lineasC.length * 12.5;
+    if(yN + hC > LIMITE){ pie(); pdf.addPage(); pagina++; yN = continuacion() + 6; }
+    pdf.stroke(LINEA); pdf.lineWidth(0.8);
+    pdf.fill([255, 251, 235]); pdf.rect(M, yN, ANCHO, hC, 'B');
+    pdf.fill([217, 119, 6]); pdf.rect(M, yN, 3, hC, 'f');
+    pdf.text('COMENTARIOS', M + 12, yN + 14, { size: 8, bold: true, color: [180, 83, 9] });
+    lineasC.forEach((l, k) => pdf.text(l, M + 12, yN + 28 + k * 12.5, { size: 9.5, color: NEGRO }));
+    yN += hC + 8;
+  }
+
   // Notas
-  let yN = Math.max(yT, y + 60) + 14;
   const notas = (e.notas || '').split(/\n+/).map((s) => s.trim()).filter(Boolean);
   if(notas.length){
     const lineasN = [];
@@ -343,7 +359,7 @@ export async function generarFacturaPDF(datos){
     pdf.stroke(LINEA); pdf.rect(M, yN, ANCHO, hN, 'S');
     pdf.text('NOTAS', M + 12, yN + 13, { size: 8, bold: true, color: AZUL });
     lineasN.forEach((l, k) => pdf.text(l, M + 12, yN + 26 + k * 11, { size: 8.5, color: GRIS }));
-    yN += hN + 18;
+    yN += hN + 16;
   }
   pdf.text('¡Gracias por su compra!', PAGE_W / 2, Math.min(yN + 6, LIMITE), { size: 11, bold: true, color: AZUL, align: 'center' });
   pie();
