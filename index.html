@@ -320,7 +320,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -607,6 +607,18 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     r.recibido = r.contado + r.abonos;
     r.efectivoNeto = r.recibido - r.totalGastos;
     return r;
+  }
+  function ventasSinSalida(){
+    var limite = Date.now() - 30*24*3600*1000;
+    return state.ventas.filter(function(v){ return !v.jornadaId && new Date(v.fecha).getTime() >= limite; });
+  }
+  function incluirEnJornada(ventas, j){
+    var b = writeBatch(fs);
+    ventas.forEach(function(v){
+      b.update(doc(fs, 'ventas/'+v.id), { jornadaId:j.id, rutaId:j.rutaId, rutaNombre:j.rutaNombre });
+      v.jornadaId = j.id; v.rutaId = j.rutaId; v.rutaNombre = j.rutaNombre;
+    });
+    enSegundoPlano(b.commit());
   }
   function cerrarJornada(j){
     var resumen = resumenJornada(j);
@@ -1437,6 +1449,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">Iniciada '+horaCorta(jornada.iniciadaEn)+' · '+rj.facturas+' factura(s) · <span class="mono">'+fmtCOP(rj.totalVendido)+'</span></div></div>'+
           '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta">Cerrar ruta</button>'+
         '</div>'+
+        ((state.isAdmin && ventasSinSalida().length) ?
+          '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="abrir-incluir-facturas">+ Incluir facturas hechas antes ('+ventasSinSalida().length+')</button>' : '')+
       '</div>';
     }
     return bannerEdicion + bannerJornada + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
@@ -1697,14 +1711,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }).join('') + '</div>';
 
     var movs = state.movimientos.filter(function(m){ return state.histFiltro==='todos' || m.tipo===state.histFiltro; });
-    var movsHtml = movs.length ? movs.map(function(m){
+    var etiquetaMov = {entrada:'Entrada', salida:'Salida', garantia:'Garantía'};
+    var movsHtml = !state.movAbierto ? '' : (movs.length ? movs.slice(0, 150).map(function(m){
       var badgeClass = m.tipo==='entrada'?'badge-entrada':(m.tipo==='garantia'?'badge-garantia':'badge-salida');
       var signo = m.tipo==='entrada' ? '+' : '-';
       return '<div class="list-item"><div class="row between">'+
-        '<div><span class="badge '+badgeClass+'">'+etiquetas[m.tipo]||m.tipo+'</span> <span class="product-name" style="margin-left:6px;">'+esc(m.productoNombre)+'</span></div>'+
+        '<div><span class="badge '+badgeClass+'">'+(etiquetaMov[m.tipo]||m.tipo)+'</span> <span class="product-name" style="margin-left:6px;">'+esc(m.productoNombre)+'</span></div>'+
         '<span class="mono" style="font-weight:700;">'+signo+m.cantidad+'</span>'+
-        '</div><div class="small muted" style="margin-top:3px;">'+fmtFecha(m.fecha)+(m.clienteNombre?(' · '+esc(m.clienteNombre)):'')+'</div></div>';
-    }).join('') : '<div class="empty">Sin movimientos.</div>';
+        '</div><div class="small muted" style="margin-top:3px;">'+fmtFecha(m.fecha)+(m.clienteNombre?(' · '+esc(m.clienteNombre)):'')+(m.nota?(' · '+esc(m.nota)):'')+'</div></div>';
+    }).join('') : '<div class="empty">Sin movimientos.</div>');
 
     // Todo el historial se ve por ruta (sin opción "Todas")
     var hayHuerfanos = state.ventas.some(function(v){ return !v.rutaId || !rutaById(v.rutaId); }) || state.gastos.some(function(g){ return !g.rutaId || !rutaById(g.rutaId); });
@@ -1789,8 +1804,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<h2 class="section-title">Gastos'+(gastosRuta.length?(' · <span class="mono">'+fmtCOP(totalGastosF)+'</span>'):'')+'</h2><div class="card">'+gastosHistHtml+'</div>'+
       '<h2 class="section-title">Facturas</h2><div class="card">'+facturasHtml+'</div>'+
       '<div class="divider" style="margin:22px 0 4px;"></div>'+
-      '<h2 class="section-title">Movimientos de inventario</h2>'+filtroHtml+
-      '<div class="card">'+movsHtml+'</div>'+
+      '<button class="card row between" style="width:100%;margin-top:14px;text-align:left;color:var(--text);" data-action="toggle-movimientos">'+
+        '<span class="product-name">Movimientos de inventario</span>'+
+        '<span class="small muted">'+(state.movAbierto?'Ocultar ▴':'Ver ▾')+'</span>'+
+      '</button>'+
+      (state.movAbierto ? filtroHtml+'<div class="card">'+movsHtml+'</div>' : '')+
       (state.isAdmin ? renderAdminUsuarios() : '')+
       (state.isAdmin ? ('<h2 class="section-title">Numeración de facturas</h2><div class="card">'+
         '<div class="field"><label>Próxima factura N.°</label><input id="cfg-proxima" type="number" inputmode="numeric" min="1" value="'+((Number(state.config && state.config.contadorFactura)||0)+1)+'"></div>'+
@@ -1889,6 +1907,24 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           (state.editandoVenta
             ? '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Guardar cambios</button>'
             : '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Confirmar venta</button>')+
+          '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
+        '</div>';
+    } else if(state.modal.type==='incluir-facturas'){
+      var jIn = miJornada();
+      var lista = ventasSinSalida();
+      var hoyStr = new Date().toDateString();
+      html = '<h3>Incluir facturas en '+esc(jIn?jIn.rutaNombre:'')+'</h3>'+
+        '<div class="small muted" style="margin-bottom:12px;">Marca las facturas que hiciste antes de iniciar la ruta. Pasan a contar en el balance de esta salida.</div>'+
+        (lista.length ? '<div class="card" style="padding:4px 12px;">'+lista.map(function(v){
+          var marcada = new Date(v.fecha).toDateString()===hoyStr;
+          return '<label class="row between" style="padding:10px 0;border-bottom:1px solid var(--border);margin:0;color:var(--text);font-size:14px;">'+
+            '<span class="row" style="gap:10px;"><input type="checkbox" class="inc-fac" value="'+v.id+'" '+(marcada?'checked':'')+' style="width:22px;height:22px;">'+
+            '<span><strong>#'+v.numero+'</strong> · '+esc(v.clienteNombre||'')+'<br><span class="small muted">'+fmtFecha(v.fecha)+(v.rutaNombre?(' · '+esc(v.rutaNombre)):'')+'</span></span></span>'+
+            '<span class="mono" style="font-weight:700;">'+fmtCOP(v.total)+'</span>'+
+          '</label>';
+        }).join('')+'</div>' : '<div class="empty">No hay facturas por incluir.</div>')+
+        '<div class="row" style="margin-top:12px;">'+
+          '<button class="btn btn-primary" style="flex:1" data-action="incluir-facturas">Incluir en la ruta</button>'+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>';
     } else if(state.modal.type==='balance-ruta'){
@@ -2125,6 +2161,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.modal = {type:'balance-ruta', jornada:cerrada};
       render();
     }
+    else if(action==='abrir-incluir-facturas'){ state.modal = {type:'incluir-facturas'}; render(); }
+    else if(action==='incluir-facturas'){
+      var jInc = miJornada(); if(!jInc) return;
+      var ids = Array.prototype.map.call(document.querySelectorAll('.inc-fac:checked'), function(el){ return el.value; });
+      if(!ids.length){ toast('Marca al menos una factura'); return; }
+      incluirEnJornada(state.ventas.filter(function(v){ return ids.indexOf(v.id)!==-1; }), jInc);
+      state.modal = null; render();
+      toast(ids.length+' factura(s) incluidas en '+jInc.rutaNombre);
+    }
     else if(action==='ver-balance'){
       var jb = state.jornadas.find(function(j){ return j.id===id; });
       if(jb){ state.modal = {type:'balance-ruta', jornada:jb}; render(); }
@@ -2140,6 +2185,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='filtro-ruta'){ state.selectedRutaId = t.getAttribute('data-ruta'); state.selectedClienteId=null; render(); }
     else if(action==='filtro-hist'){ state.histFiltro = t.getAttribute('data-f'); render(); }
     else if(action==='filtro-deudor-ruta'){ state.deudorFiltroRuta = t.getAttribute('data-ruta'); render(); }
+    else if(action==='toggle-movimientos'){ state.movAbierto = !state.movAbierto; render(); }
     else if(action==='filtro-hist-ruta'){ state.histRuta = t.getAttribute('data-ruta'); render(); }
     else if(action==='marcar-pagado'){
       await db.doc('ventas/'+id).update({saldo:0});
