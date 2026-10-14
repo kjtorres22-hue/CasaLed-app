@@ -309,10 +309,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     // auth: loading | signedOut | verify | pending | blocked | ready
     auth: { status:'loading', user:null, perfil:null, pantalla:'login', error:'' },
     usuarios: [],
-    importando: false
+    importando: false,
+    editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','editar-factura','guardar-numeracion'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -426,6 +427,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     setTimeout(function(){ state.toastMsg = null; render(); }, 2200);
   }
   function productoById(id){ return state.productos.find(function(p){return p.id===id;}); }
+  function claveItem(it){ return it.productoId + (it.color ? '|'+it.color : ''); }
+  // Unidades que ya tenía la factura que se está editando (vuelven al stock disponible).
+  function cantidadOriginal(pid, color){
+    var v = state.editandoVenta; if(!v) return 0;
+    return (v.items||[]).reduce(function(s, it){
+      if(it.productoId!==pid) return s;
+      if(color) return s + ((it.color||null)===color ? (Number(it.cantidad)||0) : 0);
+      return s + (Number(it.cantidad)||0);
+    }, 0);
+  }
   function cartTotalForProducto(pid){
     var total = 0;
     Object.keys(state.cart).forEach(function(k){
@@ -439,8 +450,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var pid = parts[0], color = parts[1]||null;
       var p = productoById(pid);
       var cant = state.cart[key];
-      var nombre = (p?p.nombre:'') + (color?(' - '+color):'');
-      return {productoId:pid, nombre:nombre, color:color, cantidad:cant, precio:p?Number(p.costoVenta)||0:0, subtotal:cant*(p?Number(p.costoVenta)||0:0)};
+      var orig = state.editandoVenta ? (state.editandoVenta.items||[]).find(function(it){ return claveItem(it)===key; }) : null;
+      var nombre = orig ? orig.nombre : ((p?p.nombre:'') + (color?(' - '+color):''));
+      var precio = orig ? (Number(orig.precio)||0) : (p?Number(p.costoVenta)||0:0);
+      return {productoId:pid, nombre:nombre, color:color, cantidad:cant, precio:precio, subtotal:cant*precio};
     }).filter(function(it){ return it.cantidad>0; });
   }
   function clienteById(id){ return state.clientes.find(function(c){return c.id===id;}); }
@@ -781,6 +794,71 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
   }
 
+  // Guarda los cambios de una factura: ajusta el stock solo por la diferencia y deja registro en movimientos.
+  async function guardarEdicionVenta(clienteDirecto){
+    var orig = state.editandoVenta; if(!orig) return;
+    var items = buildCartItems();
+    if(!items.length){ toast('La factura debe tener al menos un producto'); return; }
+    var cliente = clienteDirecto || clienteById(state.selectedClienteId) ||
+      (state.selectedClienteId && state.selectedClienteId===orig.clienteId ? {id:orig.clienteId, nombre:orig.clienteNombre, telefono:orig.clienteTelefono} : null);
+    if(!cliente){ toast('Elige el cliente'); return; }
+    var total = items.reduce(function(s,it){ return s+it.subtotal; }, 0);
+    var tipoPago = state.checkoutPago || 'contado';
+    var abono = tipoPago==='credito' ? Math.max(0, Math.min(total, Number(state.checkoutAbono)||0)) : total;
+    var saldo = Math.max(0, total - abono);
+
+    var delta = {};
+    (orig.items||[]).forEach(function(it){ var k = claveItem(it); delta[k] = (delta[k]||0) - (Number(it.cantidad)||0); });
+    items.forEach(function(it){ var k = claveItem(it); delta[k] = (delta[k]||0) + it.cantidad; });
+
+    var b = writeBatch(fs);
+    var porProd = {};
+    Object.keys(delta).forEach(function(k){
+      var d = delta[k]; if(!d) return;
+      var parts = k.split('|'), pid = parts[0], color = parts[1] || null;
+      if(!porProd[pid]) porProd[pid] = {total:0, porColor:{}};
+      porProd[pid].total += d;
+      if(color) porProd[pid].porColor[color] = (porProd[pid].porColor[color]||0) + d;
+    });
+    Object.keys(porProd).forEach(function(pid){
+      var p = productoById(pid); if(!p) return;
+      var dd = porProd[pid];
+      var args = [new FieldPath('stock'), increment(-dd.total)];
+      if(p.colores && p.colores.length){
+        Object.keys(dd.porColor).forEach(function(c){ if(dd.porColor[c]) args.push(new FieldPath('stockPorColor', c), increment(-dd.porColor[c])); });
+      }
+      b.update(doc(fs, 'productos/'+pid), ...args);
+    });
+    var fecha = todayISO();
+    Object.keys(delta).forEach(function(k){
+      var d = delta[k]; if(!d) return;
+      var parts = k.split('|'); var p = productoById(parts[0]);
+      b.set(doc(collection(fs, 'movimientos')), {
+        tipo: d>0 ? 'salida' : 'entrada', productoId:parts[0],
+        productoNombre:(p?p.nombre:'')+(parts[1]?(' - '+parts[1]):''), cantidad:Math.abs(d),
+        clienteId:cliente.id, clienteNombre:cliente.nombre, ventaId:orig.id,
+        nota:'Edición factura #'+orig.numero, fecha:fecha,
+        usuarioId:state.auth.user.uid, usuarioNombre:nombreUsuario()
+      });
+    });
+    var ruta = rutaById(cliente.rutaId);
+    var cambios = {
+      clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
+      rutaId:cliente.rutaId||orig.rutaId||null, rutaNombre:ruta?ruta.nombre:(orig.rutaNombre||''),
+      items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo,
+      editadoEn:fecha, editadoPor:nombreUsuario()
+    };
+    b.update(doc(fs, 'ventas/'+orig.id), cambios);
+    enSegundoPlano(b.commit());
+
+    var actualizada = Object.assign({}, orig, cambios);
+    state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
+    state.checkoutPago = 'contado'; state.checkoutAbono = 0;
+    abrirFactura(actualizada, cliente, false);
+    state.modal.editada = true; render();
+    toast('Factura #'+orig.numero+' actualizada');
+  }
+
   async function generarAnalisisIA(){
     if(!sampleApi){ toast('El análisis con IA no está disponible en esta sesión.'); return; }
     var periodo = state.reportePeriodo || 'mes';
@@ -988,7 +1066,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       },0);
       cartSlot.innerHTML = '<div class="cart-bar"><div class="cart-inner">'+
         '<span>'+cartCount+' und · '+fmtCOP(totalCarrito)+'</span>'+
-        '<button class="btn" style="background:#04070C;color:#2B8CFF;" data-action="abrir-revisar-factura">Revisar factura</button>'+
+        '<button class="btn" style="background:#04070C;color:#2B8CFF;" data-action="abrir-revisar-factura">'+(state.editandoVenta?'Revisar cambios':'Revisar factura')+'</button>'+
         '</div></div>';
     } else {
       cartSlot.innerHTML = '';
@@ -1103,7 +1181,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var productosHtml = state.productos.length ? state.productos.map(function(p){
       var enCarritoTotal = cartTotalForProducto(p.id);
-      var dispTotal = Math.max(0,(Number(p.stock)||0) - enCarritoTotal);
+      var dispTotal = Math.max(0,(Number(p.stock)||0) + cantidadOriginal(p.id) - enCarritoTotal);
       var header = '<div class="row" style="margin-bottom:6px;">'+
           (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
           '<div>'+
@@ -1116,7 +1194,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           var key = p.id+'|'+color;
           var enCarrito = state.cart[key]||0;
           var stockColor = (p.stockPorColor && p.stockPorColor[color]) ? Number(p.stockPorColor[color]) : 0;
-          var disponible = Math.max(0, stockColor - enCarrito);
+          var disponible = Math.max(0, stockColor + cantidadOriginal(p.id, color) - enCarrito);
           return '<div class="row between" style="padding:4px 0;">'+
             '<span class="small">'+esc(color)+' <span class="muted">(stock '+stockColor+')</span></span>'+
             '<div class="qty-control">'+
@@ -1156,7 +1234,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       }).join('')+'</div>' : '')+
     '</div>';
 
-    return rutasHtml + gastosHtml + clienteHtml +
+    var bannerEdicion = state.editandoVenta ?
+      '<div class="card" style="border-color:var(--amber);background:var(--amber-dim);">'+
+        '<div class="row between"><div><div class="product-name">✏️ Editando factura #'+state.editandoVenta.numero+'</div>'+
+        '<div class="small muted">Cambia cantidades o productos y toca "Revisar cambios".</div></div>'+
+        '<button class="btn btn-sm btn-ghost" data-action="cancelar-edicion">Cancelar</button></div>'+
+      '</div>' : '';
+    return bannerEdicion + rutasHtml + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
       '<h2 class="section-title">Productos</h2>' +
       '<div class="card">'+productosHtml+'</div>';
   }
@@ -1446,7 +1530,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var facturasHtml = state.ventas.length ? state.ventas.map(function(v){
       return '<div class="list-item"><div class="row between">'+
-        '<div><span class="product-name">Factura #'+v.numero+'</span>'+(v.tipoPago==='credito'?' <span class="badge" style="background:rgba(248,113,113,.15);color:var(--red);">Crédito'+(v.saldo>0?(' · Saldo '+fmtCOP(v.saldo)):' · Pagado')+'</span>':'')+'<div class="small muted">'+esc(v.clienteNombre)+' · '+fmtFecha(v.fecha)+'</div></div>'+
+        '<div><span class="product-name">Factura #'+v.numero+'</span>'+(v.editadoEn?' <span class="badge" style="background:var(--amber-dim);color:var(--amber);">Editada</span>':'')+(v.tipoPago==='credito'?' <span class="badge" style="background:rgba(248,113,113,.15);color:var(--red);">Crédito'+(v.saldo>0?(' · Saldo '+fmtCOP(v.saldo)):' · Pagado')+'</span>':'')+'<div class="small muted">'+esc(v.clienteNombre)+' · '+fmtFecha(v.fecha)+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;">'+fmtCOP(v.total)+'</span>'+
           '<button class="btn btn-sm btn-ghost" data-action="ver-factura" data-id="'+v.id+'">Factura</button>'+
@@ -1485,6 +1569,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<h2 class="section-title">Movimientos de inventario</h2>'+filtroHtml+
       '<div class="card">'+movsHtml+'</div>'+
       (state.isAdmin ? renderAdminUsuarios() : '')+
+      (state.isAdmin ? ('<h2 class="section-title">Numeración de facturas</h2><div class="card">'+
+        '<div class="field"><label>Próxima factura N.°</label><input id="cfg-proxima" type="number" inputmode="numeric" min="1" value="'+((Number(state.config && state.config.contadorFactura)||0)+1)+'"></div>'+
+        '<button class="btn btn-primary btn-block" data-action="guardar-numeracion">Guardar numeración</button>'+
+        '<div class="small muted" style="margin-top:8px;">Las facturas siguen contando desde este número.</div>'+
+      '</div>') : '')+
       '<h2 class="section-title">Datos de la empresa</h2>'+
       (state.isAdmin ? '' : '<div class="small muted" style="margin-bottom:10px;">🔒 Solo el administrador puede editar estos datos.</div>')+
       '<div class="card">'+
@@ -1558,7 +1647,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
               return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+(ru?(' · '+esc(ru.nombre)):'')+'</option>';
             }).join('')+
           '</select></div>');
-      html = '<h3>Revisar factura</h3>'+
+      html = '<h3>'+(state.editandoVenta?('Editar factura #'+state.editandoVenta.numero):'Revisar factura')+'</h3>'+
         bloqueCliente+
         '<label>Forma de pago</label>'+
         '<div class="chips" style="margin-bottom:10px;">'+
@@ -1572,7 +1661,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<label>Así se verá la factura</label>'+
         '<div class="invoice-preview" id="rf-preview">'+esc(previewTexto)+'</div>'+
         '<div class="row" style="margin-top:12px;">'+
-          '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Confirmar venta</button>'+
+          (state.editandoVenta
+            ? '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Guardar cambios</button>'
+            : '<button class="btn btn-primary" style="flex:1" data-action="confirmar-venta">Confirmar venta</button>')+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>';
     } else if(state.modal.type==='cuenta'){
@@ -1591,7 +1682,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     } else if(state.modal.type==='factura-lista'){
       var mv = state.modal.venta, mc = state.modal.cliente;
       var tel = (mc.telefono||'').replace(/[^0-9]/g,'');
-      html = '<h3>Factura #'+mv.numero+(state.modal.nueva?' registrada':'')+'</h3>'+
+      html = '<h3>Factura #'+mv.numero+(state.modal.nueva?' registrada':(state.modal.editada?' actualizada':''))+'</h3>'+
         '<div class="small muted" style="margin-bottom:14px;">'+esc(mc.nombre||'')+' · '+fmtCOP(mv.total)+
           (mv.tipoPago==='credito'?(' · Crédito, saldo '+fmtCOP(mv.saldo)):' · Contado')+
           (state.modal.offline?' · guardada en el teléfono, se sube cuando haya señal':'')+'</div>'+
@@ -1602,7 +1693,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
         '</button>'+
         '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
-        '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="cerrar-modal">Listo</button>';
+        (state.isAdmin && mv.id ? '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="editar-factura">✏️ Editar factura</button>' : '')+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Listo</button>';
     } else if(state.modal.type==='nuevo-producto' || state.modal.type==='editar-producto'){
       var p = state.modal.producto || {};
       html = '<h3>'+(state.modal.type==='editar-producto'?'Editar producto':'Nuevo producto')+'</h3>'+
@@ -1776,9 +1868,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var disp;
       if(colorInc && pInc.colores && pInc.colores.length){
         var stockColorInc = (pInc.stockPorColor && pInc.stockPorColor[colorInc]) ? Number(pInc.stockPorColor[colorInc]) : 0;
-        disp = stockColorInc - cur;
+        disp = stockColorInc + cantidadOriginal(pidInc, colorInc) - cur;
       } else {
-        disp = (Number(pInc.stock)||0) - cartTotalForProducto(pidInc);
+        disp = (Number(pInc.stock)||0) + cantidadOriginal(pidInc) - cartTotalForProducto(pidInc);
       }
       if(disp>0){ state.cart[id]=cur+1; render(); }
     }
@@ -1789,12 +1881,38 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='abrir-revisar-factura'){
       if(Object.values(state.cart).reduce(function(a,b){return a+b;},0)===0){ toast('Agrega productos al pedido'); return; }
-      state.checkoutPago = 'contado'; state.checkoutAbono = 0;
+      if(!state.editandoVenta){ state.checkoutPago = 'contado'; state.checkoutAbono = 0; }
       state.modal = {type:'revisar-factura'}; render();
     }
     else if(action==='rf-crear-cliente'){ state.modal.crearCliente = true; state.modal.nc = state.modal.nc || {}; render(); }
     else if(action==='rf-elegir-existente'){ state.modal.crearCliente = false; render(); }
     else if(action==='compartir-pdf'){ compartirPdf(); }
+    else if(action==='editar-factura'){
+      var ve = state.modal && state.modal.venta;
+      if(!ve || !ve.id) return;
+      state.editandoVenta = ve;
+      state.cart = {};
+      (ve.items||[]).forEach(function(it){ var k = claveItem(it); state.cart[k] = (state.cart[k]||0) + (Number(it.cantidad)||0); });
+      state.selectedClienteId = ve.clienteId || null;
+      state.checkoutPago = ve.tipoPago || 'contado';
+      state.checkoutAbono = ve.tipoPago==='credito' ? (Number(ve.abono)||0) : 0;
+      state.modal = null; state.activeTab = 'vender';
+      render(); window.scrollTo(0,0);
+      toast('Editando factura #'+ve.numero);
+    }
+    else if(action==='cancelar-edicion'){
+      state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
+      state.checkoutPago = 'contado'; state.checkoutAbono = 0;
+      render(); toast('Edición cancelada');
+    }
+    else if(action==='guardar-numeracion'){
+      var prox = parseInt(document.getElementById('cfg-proxima').value, 10);
+      if(!(prox >= 1)){ toast('Escribe un número válido'); return; }
+      var maxNum = state.ventas.reduce(function(m, v){ return Math.max(m, Number(v.numero)||0); }, 0);
+      if(prox <= maxNum && !confirm('Ya existe la factura #'+maxNum+'. Si sigues, se pueden repetir números. ¿Continuar?')) return;
+      await guardarEmpresa({contadorFactura: prox - 1});
+      toast('La próxima factura será la N.° '+prox);
+    }
     else if(action==='ver-factura'){
       var vf = state.ventas.find(function(v){ return v.id===id; });
       if(vf) abrirFactura(vf, null, false);
@@ -1815,7 +1933,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           rutaId: ncv.rutaId!=null ? (ncv.rutaId||null) : (state.selectedRutaId!=='__todas__' ? state.selectedRutaId : null)
         });
       } else if(!state.selectedClienteId){ toast('Elige el cliente o crea uno nuevo'); return; }
-      await confirmarVenta(clienteVenta);
+      if(state.editandoVenta) await guardarEdicionVenta(clienteVenta);
+      else await confirmarVenta(clienteVenta);
     }
     else if(action==='abrir-nuevo-producto'){ state.modal={type:'nuevo-producto'}; render(); }
     else if(action==='abrir-editar-producto'){ state.modal={type:'editar-producto', producto:productoById(id)}; render(); }
