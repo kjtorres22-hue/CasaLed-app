@@ -567,6 +567,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   // ---------- JORNADAS DE RUTA ----------
+  // En Despachos se puede vender a cualquier cliente; en las demás rutas solo a los clientes de esa ruta.
+  function esRutaDespachos(rutaId){
+    var r = rutaById(rutaId);
+    return rutaId==='despachos' || !!(r && /despacho/i.test(r.nombre||''));
+  }
+  function clientesParaVenta(){
+    var j = state.editandoVenta ? null : miJornada();
+    if(!j || esRutaDespachos(j.rutaId)) return state.clientes.slice();
+    return state.clientes.filter(function(c){ return c.rutaId===j.rutaId || c.id===state.selectedClienteId; });
+  }
   function miJornada(){
     var uid = state.auth.user && state.auth.user.uid;
     return state.jornadas.find(function(j){ return j.estado==='abierta' && j.iniciadaPor===uid; }) || null;
@@ -1365,17 +1375,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(jornada){ state.selectedRutaId = jornada.rutaId; }
 
     var rutaActual = jornada ? jornada.rutaId : null;
-    var clientesRuta = state.clientes.filter(function(c){ return rutaActual && c.rutaId===rutaActual; });
-    var clientesOtros = state.clientes.filter(function(c){ return !(rutaActual && c.rutaId===rutaActual); });
+    var clientesRuta = clientesParaVenta();
     var optCli = function(c){ return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+'</option>'; };
     var clienteSel = clienteById(state.selectedClienteId);
     var clienteHtml = '<div class="card">'+
       '<label>Cliente (opcional, también lo puedes elegir o crear al final)</label>'+
       '<select id="sel-cliente">'+
         '<option value="">Selecciona un cliente…</option>'+
-        (clientesRuta.length ? '<optgroup label="'+esc(jornada ? jornada.rutaNombre : 'Ruta')+'">'+clientesRuta.map(optCli).join('')+'</optgroup>' : '')+
-        (clientesOtros.length ? '<optgroup label="Otros clientes">'+clientesOtros.map(optCli).join('')+'</optgroup>' : '')+
+        clientesRuta.map(optCli).join('')+
       '</select>'+
+      (jornada && !clientesRuta.length ? '<div class="small muted" style="margin-top:8px;">No hay clientes en '+esc(jornada.rutaNombre)+'. Lo puedes crear al revisar la factura.</div>' : '')+
       (clienteSel && clienteSel.direccion ? '<div class="small muted" style="margin-top:8px;">'+esc(clienteSel.direccion)+'</div>' : '') +
       '</div>';
 
@@ -1879,7 +1888,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="link-btn" data-action="rf-crear-cliente">+ Crear cliente nuevo</button></div>'+
           '<select id="rf-cliente">'+
             '<option value="">Elige el cliente…</option>'+
-            state.clientes.slice().sort(function(a,b){
+            clientesParaVenta().sort(function(a,b){
               var ra = (state.selectedRutaId!=='__todas__' && a.rutaId===state.selectedRutaId)?0:1;
               var rb = (state.selectedRutaId!=='__todas__' && b.rutaId===state.selectedRutaId)?0:1;
               return ra-rb || String(a.nombre).localeCompare(String(b.nombre));
