@@ -533,7 +533,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.clientes = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render({preservar:true});
     });
-    db.collection('rutas').onSnapshot(function(snap){
+    db.collection('rutas').orderBy('creadoEn').onSnapshot(function(snap){
       state.rutas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render({preservar:true});
     });
@@ -1706,28 +1706,42 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '</div><div class="small muted" style="margin-top:3px;">'+fmtFecha(m.fecha)+(m.clienteNombre?(' · '+esc(m.clienteNombre)):'')+'</div></div>';
     }).join('') : '<div class="empty">Sin movimientos.</div>';
 
-    var deudorFiltro = state.deudorFiltroRuta || '__todas__';
-    var deudoresChips = '<div class="chips">' +
-      '<button class="chip'+(deudorFiltro==='__todas__'?' active':'')+'" data-action="filtro-deudor-ruta" data-ruta="__todas__">Todas</button>' +
-      state.rutas.map(function(r){
-        return '<button class="chip'+(deudorFiltro===r.id?' active':'')+'" data-action="filtro-deudor-ruta" data-ruta="'+r.id+'">'+esc(r.nombre)+'</button>';
-      }).join('') + '</div>';
-    var deudores = state.ventas.filter(function(v){
-      return v.tipoPago==='credito' && (Number(v.saldo)||0) > 0 && (deudorFiltro==='__todas__' || v.rutaId===deudorFiltro);
-    });
+    // Todo el historial se ve por ruta (sin opción "Todas")
+    var hayHuerfanos = state.ventas.some(function(v){ return !v.rutaId || !rutaById(v.rutaId); }) || state.gastos.some(function(g){ return !g.rutaId || !rutaById(g.rutaId); });
+    var rutasHist = state.rutas.slice();
+    var hr = state.histRuta;
+    if(!hr || (hr!=='__sin__' && !rutaById(hr))){
+      var jAct = miJornada();
+      var ultimaVenta = state.ventas.find(function(v){ return v.rutaId && rutaById(v.rutaId); });
+      hr = (jAct && jAct.rutaId) || (ultimaVenta && ultimaVenta.rutaId) || (rutasHist[0] && rutasHist[0].id) || '__sin__';
+    }
+    var enRuta = function(rid){ return hr==='__sin__' ? (!rid || !rutaById(rid)) : rid===hr; };
+    var nombreRutaHist = hr==='__sin__' ? 'Sin ruta' : ((rutaById(hr)||{}).nombre || '');
+    var rutaChips = '<div class="chips">' +
+      rutasHist.map(function(r){
+        return '<button class="chip'+(hr===r.id?' active':'')+'" data-action="filtro-hist-ruta" data-ruta="'+r.id+'">'+esc(r.nombre)+'</button>';
+      }).join('') +
+      (hayHuerfanos ? '<button class="chip'+(hr==='__sin__'?' active':'')+'" data-action="filtro-hist-ruta" data-ruta="__sin__">Sin ruta</button>' : '') +
+      '</div>';
+
+    var ventasRuta = state.ventas.filter(function(v){ return enRuta(v.rutaId); });
+    var gastosRuta = state.gastos.filter(function(g){ return enRuta(g.rutaId); });
+    var jornadasRuta = state.jornadas.filter(function(j){ return enRuta(j.rutaId); });
+
+    var deudores = ventasRuta.filter(function(v){ return v.tipoPago==='credito' && (Number(v.saldo)||0) > 0; });
     var totalDeuda = deudores.reduce(function(s,v){return s+(Number(v.saldo)||0);},0);
     var deudoresHtml = deudores.length ? deudores.map(function(v){
       return '<div class="list-item"><div class="row between">'+
         '<div><span class="product-name">'+esc(v.clienteNombre)+'</span>'+
-          '<div class="small muted">Factura #'+v.numero+' · '+esc(v.rutaNombre||'Sin ruta')+' · '+fmtFecha(v.fecha)+'</div></div>'+
+          '<div class="small muted">Factura #'+v.numero+' · '+fmtFecha(v.fecha)+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;color:var(--red);">'+fmtCOP(v.saldo)+'</span>'+
           '<button class="btn btn-sm btn-ghost" data-action="marcar-pagado" data-id="'+v.id+'">Marcar pagado</button>'+
         '</div>'+
       '</div></div>';
-    }).join('') : '<div class="empty">No hay deudores'+(deudorFiltro!=='__todas__'?' en esta ruta':'')+'.</div>';
+    }).join('') : '<div class="empty" style="padding:16px;">Nadie debe en esta ruta.</div>';
 
-    var facturasHtml = state.ventas.length ? state.ventas.map(function(v){
+    var facturasHtml = ventasRuta.length ? ventasRuta.map(function(v){
       return '<div class="list-item"><div class="row between">'+
         '<div><span class="product-name">Factura #'+v.numero+'</span>'+(v.editadoEn?' <span class="badge" style="background:var(--amber-dim);color:var(--amber);">Editada</span>':'')+(v.tipoPago==='credito'?' <span class="badge" style="background:rgba(248,113,113,.15);color:var(--red);">Crédito'+(v.saldo>0?(' · Saldo '+fmtCOP(v.saldo)):' · Pagado')+'</span>':'')+'<div class="small muted">'+esc(v.clienteNombre)+' · '+fmtFecha(v.fecha)+'</div>'+(v.comentarios?('<div class="small" style="margin-top:2px;">💬 '+esc(v.comentarios.length>80?v.comentarios.slice(0,80)+'…':v.comentarios)+'</div>'):'')+'</div>'+
         '<div class="row">'+
@@ -1735,51 +1749,46 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-sm btn-ghost" data-action="ver-factura" data-id="'+v.id+'">Factura</button>'+
         '</div>'+
       '</div></div>';
-    }).join('') : '<div class="empty">No hay facturas todavía.</div>';
+    }).join('') : '<div class="empty" style="padding:16px;">No hay facturas en esta ruta.</div>';
 
-    var gastoFiltro = state.gastoFiltroRuta || '__todas__';
-    var gastosChips = '<div class="chips">' +
-      '<button class="chip'+(gastoFiltro==='__todas__'?' active':'')+'" data-action="filtro-gasto-ruta" data-ruta="__todas__">Todas</button>' +
-      state.rutas.map(function(r){
-        return '<button class="chip'+(gastoFiltro===r.id?' active':'')+'" data-action="filtro-gasto-ruta" data-ruta="'+r.id+'">'+esc(r.nombre)+'</button>';
-      }).join('') + '</div>';
-    var gastosFiltrados = state.gastos.filter(function(g){
-      return gastoFiltro==='__todas__' || g.rutaId===gastoFiltro;
-    });
-    var totalGastosF = gastosFiltrados.reduce(function(s,g){return s+(Number(g.monto)||0);},0);
-    var gastosHistHtml = gastosFiltrados.length ? gastosFiltrados.map(function(g){
+    var totalGastosF = gastosRuta.reduce(function(s,g){return s+(Number(g.monto)||0);},0);
+    var gastosHistHtml = gastosRuta.length ? gastosRuta.map(function(g){
       return '<div class="list-item"><div class="row between">'+
         '<div><span class="product-name">'+esc(g.concepto)+'</span>'+
-          '<div class="small muted">'+(g.rutaNombre?esc(g.rutaNombre)+' · ':'')+fmtFecha(g.fecha)+(g.nota?(' · '+esc(g.nota)):'')+'</div></div>'+
+          '<div class="small muted">'+fmtFecha(g.fecha)+(g.creadoPorNombre?(' · '+esc(g.creadoPorNombre)):'')+(g.nota?(' · '+esc(g.nota)):'')+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;color:var(--red);">'+fmtCOP(g.monto)+'</span>'+
           (state.isAdmin ? '<button class="btn btn-sm btn-ghost" data-action="editar-gasto" data-id="'+g.id+'">✎</button>' : '')+
           ((state.isAdmin || (state.auth.user && g.creadoPor===state.auth.user.uid)) ? '<button class="btn btn-sm btn-ghost" data-action="eliminar-gasto" data-id="'+g.id+'">✕</button>' : '')+
         '</div>'+
       '</div></div>';
-    }).join('') : '<div class="empty">No hay gastos registrados'+(gastoFiltro!=='__todas__'?' en esta ruta':'')+'.</div>';
+    }).join('') : '<div class="empty" style="padding:16px;">No hay gastos en esta ruta.</div>';
 
-    return '<h2 class="section-title">Deudores</h2>'+deudoresChips+
-      (deudores.length ? '<div class="small muted" style="margin-bottom:8px;">Deben en total: <strong class="mono">'+fmtCOP(totalDeuda)+'</strong></div>' : '')+
-      '<div class="card">'+deudoresHtml+'</div>'+
-      '<h2 class="section-title">Gastos de ruta</h2>'+gastosChips+
-      (gastosFiltrados.length ? '<div class="small muted" style="margin-bottom:8px;">Total gastado: <strong class="mono">'+fmtCOP(totalGastosF)+'</strong></div>' : '')+
-      '<div class="card">'+gastosHistHtml+'</div>'+
-      '<h2 class="section-title">Rutas</h2><div class="card">'+
-        (state.jornadas.length ? state.jornadas.slice(0, 20).map(function(j){
-          var tot = j.estado==='cerrada' && j.resumen ? j.resumen.totalVendido : resumenJornada(j).totalVendido;
-          return '<div class="list-item"><div class="row between">'+
-            '<div><span class="product-name">'+esc(j.rutaNombre)+'</span> '+
-              (j.estado==='abierta' ? '<span class="badge badge-entrada">En curso</span>' : '<span class="badge" style="background:var(--panel-2);color:var(--muted);">Cerrada</span>')+
-              '<div class="small muted">'+esc(j.iniciadaPorNombre||'')+' · '+fmtFecha(j.iniciadaEn)+' · '+fmtCOP(tot)+'</div></div>'+
-            '<div class="row">'+
-              '<button class="btn btn-sm btn-ghost" data-action="ver-balance" data-id="'+j.id+'">Balance</button>'+
-              (state.isAdmin && j.estado==='abierta' && !(state.auth.user && j.iniciadaPor===state.auth.user.uid) ? '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta-de" data-id="'+j.id+'">Cerrar</button>' : '')+
-            '</div>'+
-          '</div></div>';
-        }).join('') : '<div class="empty">Todavía no se ha iniciado ninguna ruta.</div>')+
+    var jornadasHtml = jornadasRuta.length ? jornadasRuta.slice(0, 15).map(function(j){
+      var tot = j.estado==='cerrada' && j.resumen ? j.resumen.totalVendido : resumenJornada(j).totalVendido;
+      return '<div class="list-item"><div class="row between">'+
+        '<div>'+(j.estado==='abierta' ? '<span class="badge badge-entrada">En curso</span>' : '<span class="badge" style="background:var(--panel-2);color:var(--muted);">Cerrada</span>')+
+          ' <span class="small">'+esc(j.iniciadaPorNombre||'')+'</span>'+
+          '<div class="small muted">'+fmtFecha(j.iniciadaEn)+' · '+fmtCOP(tot)+'</div></div>'+
+        '<div class="row">'+
+          '<button class="btn btn-sm btn-ghost" data-action="ver-balance" data-id="'+j.id+'">Balance</button>'+
+          (state.isAdmin && j.estado==='abierta' && !(state.auth.user && j.iniciadaPor===state.auth.user.uid) ? '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta-de" data-id="'+j.id+'">Cerrar</button>' : '')+
+        '</div>'+
+      '</div></div>';
+    }).join('') : '<div class="empty" style="padding:16px;">Esta ruta no se ha iniciado todavía.</div>';
+
+    var totalVendidoRuta = ventasRuta.reduce(function(s,v){ return s+(Number(v.total)||0); },0);
+
+    return rutaChips+
+      '<div class="kpi-grid">'+
+        '<div class="kpi"><div class="num mono">'+fmtCOP(totalVendidoRuta)+'</div><div class="lbl">Facturado · '+ventasRuta.length+' factura(s)</div></div>'+
+        '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(totalDeuda)+'</div><div class="lbl">Deben en '+esc(nombreRutaHist)+'</div></div>'+
       '</div>'+
-      '<h2 class="section-title">Facturas recientes</h2><div class="card">'+facturasHtml+'</div>'+
+      '<h2 class="section-title">Salidas a ruta</h2><div class="card">'+jornadasHtml+'</div>'+
+      '<h2 class="section-title">Deudores</h2><div class="card">'+deudoresHtml+'</div>'+
+      '<h2 class="section-title">Gastos'+(gastosRuta.length?(' · <span class="mono">'+fmtCOP(totalGastosF)+'</span>'):'')+'</h2><div class="card">'+gastosHistHtml+'</div>'+
+      '<h2 class="section-title">Facturas</h2><div class="card">'+facturasHtml+'</div>'+
+      '<div class="divider" style="margin:22px 0 4px;"></div>'+
       '<h2 class="section-title">Movimientos de inventario</h2>'+filtroHtml+
       '<div class="card">'+movsHtml+'</div>'+
       (state.isAdmin ? renderAdminUsuarios() : '')+
@@ -2131,6 +2140,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='filtro-ruta'){ state.selectedRutaId = t.getAttribute('data-ruta'); state.selectedClienteId=null; render(); }
     else if(action==='filtro-hist'){ state.histFiltro = t.getAttribute('data-f'); render(); }
     else if(action==='filtro-deudor-ruta'){ state.deudorFiltroRuta = t.getAttribute('data-ruta'); render(); }
+    else if(action==='filtro-hist-ruta'){ state.histRuta = t.getAttribute('data-ruta'); render(); }
     else if(action==='marcar-pagado'){
       await db.doc('ventas/'+id).update({saldo:0});
       toast('Factura marcada como pagada');
