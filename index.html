@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Casa LED · Inventario y Ventas</title>
 <meta name="theme-color" content="#07090D">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -97,7 +97,7 @@
   label{ display:block; font-size:12px; color:var(--muted); margin:0 0 5px 2px; }
   input, select, textarea{
     width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
-    border-radius:10px; padding:10px 11px; font-size:14.5px; font-family:var(--font-body);
+    border-radius:10px; padding:10px 11px; font-size:16px; font-family:var(--font-body);
     outline:none;
   }
   input:focus, select:focus, textarea:focus{ border-color:var(--amber); }
@@ -105,6 +105,8 @@
   .field-row{ display:flex; gap:8px; }
   .field-row > .field{ flex:1; }
   button{ font-family:var(--font-body); cursor:pointer; border:none; }
+  html{ -webkit-text-size-adjust:100%; touch-action:manipulation; }
+  button, a, select, input, label, .chip{ touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
   .btn{
     background:var(--panel-2); color:var(--text); border:1px solid var(--border);
     border-radius:10px; padding:10px 14px; font-size:14px; font-weight:600;
@@ -135,12 +137,14 @@
   .product-row:last-child{ border-bottom:none; }
   .product-name{ font-weight:600; font-size:14.5px; }
   .product-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
-  .qty-control{ display:flex; align-items:center; gap:8px; }
+  .qty-control{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
   .qty-btn{
-    width:30px; height:30px; border-radius:8px; background:var(--panel-2); border:1px solid var(--border);
-    color:var(--text); font-size:16px; font-weight:700; display:flex; align-items:center; justify-content:center;
+    width:44px; height:44px; border-radius:12px; background:var(--panel-2); border:1px solid var(--border);
+    color:var(--text); font-size:24px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center;
+    user-select:none; -webkit-user-select:none;
   }
-  .qty-val{ min-width:22px; text-align:center; font-weight:700; font-variant-numeric:tabular-nums; }
+  .qty-btn:active{ background:var(--amber-dim); border-color:var(--amber); }
+  .qty-val{ min-width:30px; text-align:center; font-size:17px; font-weight:700; font-variant-numeric:tabular-nums; }
   .cart-bar{
     position:fixed; left:0; right:0; bottom:64px; z-index:15;
     display:flex; justify-content:center; padding:0 14px;
@@ -313,7 +317,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -859,6 +863,39 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     toast('Factura #'+orig.numero+' actualizada');
   }
 
+  // Elimina una factura y devuelve todas sus unidades al inventario (por color cuando aplica).
+  function eliminarVenta(venta){
+    var b = writeBatch(fs);
+    var porProd = {};
+    (venta.items||[]).forEach(function(it){
+      var n = Number(it.cantidad)||0; if(!n) return;
+      if(!porProd[it.productoId]) porProd[it.productoId] = {total:0, porColor:{}};
+      porProd[it.productoId].total += n;
+      if(it.color) porProd[it.productoId].porColor[it.color] = (porProd[it.productoId].porColor[it.color]||0) + n;
+    });
+    Object.keys(porProd).forEach(function(pid){
+      var p = productoById(pid); if(!p) return;
+      var dd = porProd[pid];
+      var args = [new FieldPath('stock'), increment(dd.total)];
+      if(p.colores && p.colores.length){
+        Object.keys(dd.porColor).forEach(function(c){ args.push(new FieldPath('stockPorColor', c), increment(dd.porColor[c])); });
+      }
+      b.update(doc(fs, 'productos/'+pid), ...args);
+    });
+    var fecha = todayISO();
+    (venta.items||[]).forEach(function(it){
+      if(!(Number(it.cantidad)||0)) return;
+      b.set(doc(collection(fs, 'movimientos')), {
+        tipo:'entrada', productoId:it.productoId, productoNombre:it.nombre, cantidad:Number(it.cantidad),
+        clienteId:venta.clienteId||null, clienteNombre:venta.clienteNombre||null, ventaId:venta.id,
+        nota:'Factura #'+venta.numero+' eliminada', fecha:fecha,
+        usuarioId:state.auth.user.uid, usuarioNombre:nombreUsuario()
+      });
+    });
+    b.delete(doc(fs, 'ventas/'+venta.id));
+    enSegundoPlano(b.commit());
+  }
+
   async function generarAnalisisIA(){
     if(!sampleApi){ toast('El análisis con IA no está disponible en esta sesión.'); return; }
     var periodo = state.reportePeriodo || 'mes';
@@ -1183,7 +1220,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var enCarritoTotal = cartTotalForProducto(p.id);
       var dispTotal = Math.max(0,(Number(p.stock)||0) + cantidadOriginal(p.id) - enCarritoTotal);
       var header = '<div class="row" style="margin-bottom:6px;">'+
-          (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
+          (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;flex-shrink:0;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
           '<div>'+
             '<div class="product-name">'+esc(p.nombre)+'</div>'+
             '<div class="product-sub">'+fmtCOP(p.costoVenta)+' · <span class="'+(dispTotal<=0&&enCarritoTotal===0?'muted':'')+'">Disp: '+dispTotal+'</span></div>'+
@@ -1237,8 +1274,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var bannerEdicion = state.editandoVenta ?
       '<div class="card" style="border-color:var(--amber);background:var(--amber-dim);">'+
         '<div class="row between"><div><div class="product-name">✏️ Editando factura #'+state.editandoVenta.numero+'</div>'+
-        '<div class="small muted">Cambia cantidades o productos y toca "Revisar cambios".</div></div>'+
-        '<button class="btn btn-sm btn-ghost" data-action="cancelar-edicion">Cancelar</button></div>'+
+        '<div class="small muted">Cambia productos o cantidades. En "Revisar cambios" también cambias el cliente y si es contado o crédito.</div></div></div>'+
+        '<div class="row" style="margin-top:10px;gap:8px;">'+
+          '<button class="btn btn-primary" style="flex:1" data-action="abrir-revisar-factura">Revisar cambios</button>'+
+          '<button class="btn btn-ghost" data-action="cancelar-edicion">Cancelar</button>'+
+        '</div>'+
       '</div>' : '';
     return bannerEdicion + rutasHtml + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
       '<h2 class="section-title">Productos</h2>' +
@@ -1260,7 +1300,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
               '<button class="qty-btn" style="width:22px;height:22px;font-size:12px;'+(idx===state.productos.length-1?'opacity:.25':'')+'" data-action="mover-abajo" data-id="'+p.id+'" '+(idx===state.productos.length-1?'disabled':'')+'>▼</button>'+
             '</div>'
           ) : '')+
-          (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
+          (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;flex-shrink:0;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
           '<div>'+
             '<div class="product-name">'+(p.nombre?esc(p.nombre):'<span class="muted">Sin nombre</span>')+(p.pendiente?' <span class="badge" style="background:rgba(43,140,255,.15);color:var(--blue);">Pendiente</span>':'')+'</div>'+
             '<div class="product-sub">'+(state.isAdmin?('Compra '+fmtCOP(p.costoCompra)+' · '):'')+'Venta '+fmtCOP(p.costoVenta)+'</div>'+
@@ -1693,7 +1733,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
         '</button>'+
         '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
-        (state.isAdmin && mv.id ? '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="editar-factura">✏️ Editar factura</button>' : '')+
+        (state.isAdmin && mv.id ? (
+          '<div class="row" style="margin-top:12px;gap:8px;">'+
+            '<button class="btn btn-ghost" style="flex:1" data-action="editar-factura">✏️ Editar</button>'+
+            '<button class="btn btn-danger" style="flex:1" data-action="eliminar-factura">🗑 Eliminar</button>'+
+          '</div>') : '')+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Listo</button>';
     } else if(state.modal.type==='nuevo-producto' || state.modal.type==='editar-producto'){
       var p = state.modal.producto || {};
@@ -1899,6 +1943,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.modal = null; state.activeTab = 'vender';
       render(); window.scrollTo(0,0);
       toast('Editando factura #'+ve.numero);
+    }
+    else if(action==='eliminar-factura'){
+      var vDel = state.modal && state.modal.venta;
+      if(!vDel || !vDel.id) return;
+      var unidadesDel = (vDel.items||[]).reduce(function(s2, it){ return s2 + (Number(it.cantidad)||0); }, 0);
+      if(!confirm('¿Eliminar la factura #'+vDel.numero+' de '+(vDel.clienteNombre||'')+' por '+fmtCOP(vDel.total)+'?\n\nLas '+unidadesDel+' unidades vuelven al inventario. Esto no se puede deshacer.')) return;
+      eliminarVenta(vDel);
+      state.modal = null; render();
+      toast('Factura #'+vDel.numero+' eliminada y productos devueltos al stock');
     }
     else if(action==='cancelar-edicion'){
       state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;

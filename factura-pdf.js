@@ -270,6 +270,12 @@ export async function generarFacturaPDF(datos){
     pdf.text('Página ' + pagina, PAGE_W - M, PAGE_H - 16, { size: 7.5, color: GRIS, align: 'right' });
   }
 
+  function continuacion(){
+    pdf.fill(NEGRO); pdf.rect(0, 0, PAGE_W, 4, 'f');
+    pdf.text((e.nombre || 'Casa LED') + ' · Factura de venta N.° ' + (v.numero || '') + ' · ' + (cl.nombre || '') + ' (continuación)', M, 24, { size: 9, bold: true, color: GRIS });
+    return 36;
+  }
+
   let y = encabezado();
   y = cajaCliente(y);
   y = cabeceraTabla(y);
@@ -278,7 +284,7 @@ export async function generarFacturaPDF(datos){
   items.forEach((it, i) => {
     if(y + FILA > LIMITE){
       pie(); pdf.addPage(); pagina++;
-      y = cabeceraTabla(30);
+      y = cabeceraTabla(continuacion());
     }
     if(i % 2 === 1){ pdf.fill(ZEBRA); pdf.rect(M, y, ANCHO, FILA, 'f'); }
     pdf.stroke(LINEA); pdf.lineWidth(0.5); pdf.line(M, y + FILA, M + ANCHO, y + FILA);
@@ -301,7 +307,7 @@ export async function generarFacturaPDF(datos){
   // Totales y notas (si no caben, nueva página)
   const credito = v.tipoPago === 'credito';
   const altoTot = credito ? 104 : 70;
-  if(y + altoTot + 60 > LIMITE){ pie(); pdf.addPage(); pagina++; y = 30; }
+  if(y + altoTot > LIMITE){ pie(); pdf.addPage(); pagina++; y = continuacion() + 6; }
   const unidades = items.reduce((s, it) => s + (Number(it.cantidad) || 0), 0);
   const wT = 220, xT = PAGE_W - M - wT;
   const filaTot = (etq, val, yy, o) => {
@@ -333,7 +339,7 @@ export async function generarFacturaPDF(datos){
     const lineasN = [];
     notas.forEach((n) => pdf.envolver(n, ANCHO - 24, 8.5, false).forEach((l) => lineasN.push(l)));
     const hN = 18 + lineasN.length * 11;
-    if(yN + hN > LIMITE){ pie(); pdf.addPage(); pagina++; yN = 30; }
+    if(yN + hN > LIMITE){ pie(); pdf.addPage(); pagina++; yN = continuacion() + 6; }
     pdf.stroke(LINEA); pdf.rect(M, yN, ANCHO, hN, 'S');
     pdf.text('NOTAS', M + 12, yN + 13, { size: 8, bold: true, color: AZUL });
     lineasN.forEach((l, k) => pdf.text(l, M + 12, yN + 26 + k * 11, { size: 8.5, color: GRIS }));
