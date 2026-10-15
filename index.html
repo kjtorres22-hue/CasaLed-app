@@ -833,11 +833,93 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(extra){ Object.keys(extra).forEach(function(k){ args.push(new FieldPath(k), extra[k]); }); }
     batch.update(doc(fs, 'productos/'+p.id), ...args);
   }
+  // ---------- COSTO POR LOTES (primero en entrar, primero en salir) ----------
+  // p.lotes = [{cant, costo, fecha, ref}] del más viejo al más nuevo. Lo que hay en stock son las últimas
+  // unidades que entraron; al vender, salen primero las más viejas de esas. Sin lotes se usa costoCompra.
+  function porcionesEnStock(p, stock){
+    var lotes = (p && p.lotes) || [];
+    var resta = Math.max(0, Number(stock)||0), porciones = [];
+    for(var i = lotes.length-1; i >= 0 && resta > 0; i--){
+      var c = Math.min(Number(lotes[i].cant)||0, resta);
+      if(c > 0){ porciones.unshift({cant:c, costo:Number(lotes[i].costo)||0}); resta -= c; }
+    }
+    if(resta > 0) porciones.unshift({cant:resta, costo:Number(p.costoBase!=null ? p.costoBase : (lotes.length ? lotes[0].costo : p.costoCompra))||0});
+    return porciones;
+  }
+  // Costo total de las próximas q unidades que salen, con el stock que hay antes de la venta.
+  function costoSalida(p, q, stockAntes){
+    q = Number(q)||0; if(!p || q <= 0) return 0;
+    if(!p.lotes || !p.lotes.length) return q * (Number(p.costoCompra)||0);
+    var porciones = porcionesEnStock(p, stockAntes), total = 0, falta = q;
+    for(var i = 0; i < porciones.length && falta > 0; i++){
+      var t = Math.min(porciones[i].cant, falta); total += t * porciones[i].costo; falta -= t;
+    }
+    if(falta > 0){ var ult = p.lotes[p.lotes.length-1]; total += falta * (Number(ult.costo)||Number(p.costoCompra)||0); }
+    return total;
+  }
+  // Pone a cada renglón el costo de las unidades que salen (costo por unidad y total).
+  function asignarCostos(items, previos){
+    var usados = {};
+    items.forEach(function(it){
+      var p = productoById(it.productoId); var q = Number(it.cantidad)||0;
+      var prev = previos ? previos.find(function(o){ return claveItem(o)===claveItem(it); }) : null;
+      var total;
+      if(prev && prev.costoUnit != null){
+        var qPrev = Number(prev.cantidad)||0;
+        var extra = Math.max(0, q - qPrev);
+        total = Math.min(q, qPrev) * Number(prev.costoUnit) + (extra && p ? costoSalida(p, extra, (Number(p.stock)||0) - (usados[it.productoId]||0)) : 0);
+        usados[it.productoId] = (usados[it.productoId]||0) + extra;
+      } else if(p){
+        total = costoSalida(p, q, (Number(p.stock)||0) - (usados[it.productoId]||0));
+        usados[it.productoId] = (usados[it.productoId]||0) + q;
+      } else return;
+      it.costoTotal = Math.round(total);
+      it.costoUnit = q ? Math.round(total / q * 100) / 100 : 0;
+    });
+    return items;
+  }
+  // Agrega lotes nuevos a un producto. Si no tenía lotes, lo que ya había en stock queda como un lote al costo anterior.
+  function lotesConEntrada(p, nuevos){
+    var lotes = (p.lotes || []).slice();
+    var stockAntes = Math.max(0, Number(p.stock)||0);
+    if(!lotes.length && stockAntes > 0) lotes.push({cant:stockAntes, costo:Number(p.costoCompra)||0, fecha:todayISO(), ref:'Inventario anterior'});
+    nuevos.forEach(function(n){
+      if(!(Number(n.cant) > 0)) return;
+      lotes.push({cant:Number(n.cant), costo:Number(n.costo)||0, fecha:todayISO(), ref:n.ref||''});
+    });
+    // se borran los lotes viejos que ya se vendieron (se deja uno de margen)
+    var stockNuevo = stockAntes + nuevos.reduce(function(s2,n){ return s2 + (Number(n.cant)||0); }, 0);
+    var acum = 0, desde = 0;
+    for(var i = lotes.length-1; i >= 0; i--){ acum += Number(lotes[i].cant)||0; if(acum >= stockNuevo){ desde = Math.max(0, i-1); break; } }
+    var costoBase = p.costoBase != null ? p.costoBase : null;
+    if(desde > 0){ costoBase = Number(lotes[desde-1].costo)||0; lotes = lotes.slice(desde); }
+    if(lotes.length > 15){ costoBase = Number(lotes[lotes.length-16].costo)||0; lotes = lotes.slice(-15); }
+    return {lotes:lotes, costoBase:costoBase};
+  }
+  function textoLotes(p){
+    if(!p.lotes || !p.lotes.length) return '';
+    var por = porcionesEnStock(p, p.stock);
+    var distintos = por.filter(function(x, i){ return i===0 || x.costo !== por[i-1].costo; });
+    if(distintos.length < 2) return '';
+    // juntar porciones seguidas con el mismo costo
+    var juntas = [];
+    por.forEach(function(x){ var u = juntas[juntas.length-1]; if(u && u.costo===x.costo) u.cant += x.cant; else juntas.push({cant:x.cant, costo:x.costo}); });
+    return 'Quedan '+juntas.map(function(x){ return fmtNum(x.cant)+' a '+fmtCOP(x.costo); }).join(' · ');
+  }
+  function costoDeItem(it){
+    if(it.costoTotal != null) return Number(it.costoTotal)||0;
+    var p = productoById(it.productoId);
+    return p ? (Number(p.costoCompra)||0) * (Number(it.cantidad)||0) : 0;
+  }
+
   async function registrarEntrada(productoId, cantidad, costoCompra, nota, color){
     var p = productoById(productoId);
     if(!p) return;
     var b = writeBatch(fs);
-    var extra = (costoCompra != null && costoCompra !== '') ? {costoCompra:Number(costoCompra)} : null;
+    var extra = (costoCompra != null && costoCompra !== '') ? {costoCompra:Number(costoCompra)} : {};
+    var costoLote = (costoCompra != null && costoCompra !== '') ? Number(costoCompra) : (Number(p.costoCompra)||0);
+    var nl = lotesConEntrada(p, [{cant:Number(cantidad), costo:costoLote, ref:nota||'Entrada'}]);
+    extra.lotes = nl.lotes; if(nl.costoBase != null) extra.costoBase = nl.costoBase;
     actualizarStock(b, p, Number(cantidad), color, extra);
     b.set(doc(collection(fs,'movimientos')), {
       tipo:'entrada', productoId:productoId, productoNombre:p.nombre+(color?(' - '+color):''), cantidad:Number(cantidad),
@@ -929,7 +1011,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   async function confirmarVenta(clienteDirecto){
-    var items = buildCartItems();
+    var items = asignarCostos(buildCartItems());
     if(items.length===0){ toast('Agrega productos al pedido'); return; }
     var cliente = clienteDirecto || clienteById(state.selectedClienteId);
     if(!cliente){ toast('Elige o crea el cliente'); return; }
@@ -1007,7 +1089,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   // Guarda los cambios de una factura: ajusta el stock solo por la diferencia y deja registro en movimientos.
   async function guardarEdicionVenta(clienteDirecto){
     var orig = state.editandoVenta; if(!orig) return;
-    var items = buildCartItems();
+    var items = asignarCostos(buildCartItems(), orig.items||[]);
     if(!items.length){ toast('La factura debe tener al menos un producto'); return; }
     var cliente = clienteDirecto || clienteById(state.selectedClienteId) ||
       (state.selectedClienteId && state.selectedClienteId===orig.clienteId ? {id:orig.clienteId, nombre:orig.clienteNombre, telefono:orig.clienteTelefono} : null);
@@ -1124,10 +1206,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var topProductos = Object.values(porProducto).sort(function(a,b){return b.unidades-a.unidades;}).slice(0,8);
     var rutasOrd = Object.values(porRuta).sort(function(a,b){return b.total-a.total;});
     var utilidadEstimada = 0;
-    Object.keys(porProducto).forEach(function(pid){
-      var prod = productoById(pid);
-      if(prod) utilidadEstimada += ((Number(prod.costoVenta)||0)-(Number(prod.costoCompra)||0)) * porProducto[pid].unidades;
-    });
+    ventasF.forEach(function(v){ (v.items||[]).forEach(function(it){ utilidadEstimada += (Number(it.subtotal)||0) - costoDeItem(it); }); });
     var stockBajo = state.productos.filter(function(p){ return (Number(p.stock)||0)<=3; });
     var gastosF2 = state.gastos.filter(function(g){ return enRangoPeriodo(g.fecha, periodo); });
     var totalGastos2 = gastosF2.reduce(function(s,g){return s+(Number(g.monto)||0);},0);
@@ -1446,7 +1525,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         pid = nuevoId('productos'); nuevos++;
         b.set(doc(fs, 'productos/'+pid), {
           nombre: tituloCompra(l.descripcion || l.codigo), costoCompra: m.actualizarCostos ? Math.round(l.precio) : 0, costoVenta: 0,
-          stock: m.sumarStock ? Number(l.cantidad)||0 : 0, imagenUrl: null, pendiente: true, creadoEn: todayISO(), orden: Date.now() + nuevos
+          stock: m.sumarStock ? Number(l.cantidad)||0 : 0, imagenUrl: null, pendiente: true, creadoEn: todayISO(), orden: Date.now() + nuevos,
+          lotes: m.sumarStock ? [{cant:Number(l.cantidad)||0, costo:Math.round(l.precio), fecha:todayISO(), ref:notaMov}] : []
         }); ops++;
         if(m.sumarStock){
           b.set(doc(collection(fs,'movimientos')), { tipo:'entrada', productoId:pid, productoNombre:tituloCompra(l.descripcion||l.codigo), cantidad:Number(l.cantidad)||0,
@@ -1477,6 +1557,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(p.colores && p.colores.length) Object.keys(acc.porColor).forEach(function(c){ args.push(new FieldPath('stockPorColor', c), increment(acc.porColor[c])); });
       }
       if(m.actualizarCostos && acc.costo != null && Number(p.costoCompra) !== acc.costo){ args.push(new FieldPath('costoCompra'), acc.costo); cambiosCosto++; }
+      if(m.sumarStock && acc.stock){
+        var nlC = lotesConEntrada(p, acc.lineas.map(function(l){ return {cant:Number(l.stock)||0, costo:Number(l.costo)||Number(p.costoCompra)||0, ref:notaMov}; }));
+        args.push(new FieldPath('lotes'), nlC.lotes);
+        if(nlC.costoBase != null) args.push(new FieldPath('costoBase'), nlC.costoBase);
+      }
       if(args.length){ b.update(doc(fs, 'productos/'+pid), ...args); ops++; }
       if(m.sumarStock){
         acc.lineas.forEach(function(l){
@@ -1930,6 +2015,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div>'+
             '<div class="product-name">'+(p.nombre?esc(p.nombre):'<span class="muted">Sin nombre</span>')+(p.pendiente?' <span class="badge" style="background:rgba(43,140,255,.15);color:var(--blue);">Pendiente</span>':'')+'</div>'+
             '<div class="product-sub">'+(state.isAdmin?('Compra '+fmtCOP(p.costoCompra)+' · '):'')+'Venta '+fmtCOP(p.costoVenta)+'</div>'+
+            (state.isAdmin && textoLotes(p) ? '<div class="small" style="margin-top:3px;color:var(--amber);">'+textoLotes(p)+'</div>' : '')+
             (p.colores && p.colores.length ? '<div class="small muted" style="margin-top:3px;">'+p.colores.map(function(c){return c+': '+((p.stockPorColor&&p.stockPorColor[c])||0);}).join(' · ')+'</div>' : '')+
           '</div>'+
         '</div>'+
@@ -2097,12 +2183,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       porRuta[key].pedidos += 1;
     });
     var utilidadEstimada = 0;
-    Object.keys(porProducto).forEach(function(pid){
-      var prod = productoById(pid);
-      if(prod){
-        utilidadEstimada += ((Number(prod.costoVenta)||0) - (Number(prod.costoCompra)||0)) * porProducto[pid].unidades;
-      }
-    });
+    ventasF.forEach(function(v){ (v.items||[]).forEach(function(it){ utilidadEstimada += (Number(it.subtotal)||0) - costoDeItem(it); }); });
     var gastosF = state.gastos.filter(function(g){ return enRangoPeriodo(g.fecha, periodo); });
     var totalGastos = gastosF.reduce(function(s,g){return s+(Number(g.monto)||0);},0);
     var utilidadNeta = utilidadEstimada - totalGastos;
@@ -2119,7 +2200,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<div class="kpi"><div class="num mono">'+fmtCOP(totalVendido)+'</div><div class="lbl">Vendido ('+etiquetasP[periodo].toLowerCase()+')</div></div>'+
       '<div class="kpi"><div class="num mono">'+ventasF.length+'</div><div class="lbl">Pedidos</div></div>'+
       '<div class="kpi"><div class="num mono">'+unidadesVendidas+'</div><div class="lbl">Unidades vendidas</div></div>'+
-      '<div class="kpi"><div class="num mono" style="color:var(--green)">'+fmtCOP(utilidadEstimada)+'</div><div class="lbl">Utilidad estimada</div></div>'+
+      '<div class="kpi"><div class="num mono" style="color:var(--green)">'+fmtCOP(utilidadEstimada)+'</div><div class="lbl">Utilidad bruta</div></div>'+
       '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(totalGastos)+'</div><div class="lbl">Gastos de ruta</div></div>'+
       '<div class="kpi"><div class="num mono" style="color:'+(utilidadNeta>=0?'var(--green)':'var(--red)')+'">'+fmtCOP(utilidadNeta)+'</div><div class="lbl">Utilidad neta</div></div>'+
       '</div>';
@@ -2153,7 +2234,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<h2 class="section-title">Ventas por ruta</h2><div class="card">'+rutasHtml+'</div>'+
       '<h2 class="section-title">Productos más vendidos</h2><div class="card">'+prodHtml+'</div>'+
       iaHtml +
-      '<div class="small muted" style="margin-top:14px;">La utilidad es un estimado: usa el costo de compra y venta actuales de cada producto, no el que tenían el día de la venta.</div>'+
+      '<div class="small muted" style="margin-top:14px;">La utilidad usa lo que realmente se cobró en cada factura menos el costo de compra de las unidades que salieron (salen primero las más antiguas, cada una con su precio de compra). Las facturas hechas antes de este cambio usan el costo actual del producto.</div>'+
       renderContabilidad();
   }
 
@@ -2968,6 +3049,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         }catch(err){ toast('No se pudo subir la foto, se guardó el producto sin ella'); }
       }
       if(state.modal.type==='editar-producto'){
+        // si corrige el costo y el producto tiene lotes, se corrige el del último lote comprado
+        var pAnt = productoById(state.modal.producto.id);
+        if(pAnt && pAnt.lotes && pAnt.lotes.length && Number(pAnt.costoCompra) !== costoCompra){
+          var lotesEd = pAnt.lotes.map(function(l){ return Object.assign({}, l); });
+          lotesEd[lotesEd.length-1].costo = costoCompra;
+          extra.lotes = lotesEd;
+        }
         await editarProducto(state.modal.producto.id, extra);
       } else {
         extra.stock = Number(document.getElementById('mp-stock').value)||0;
