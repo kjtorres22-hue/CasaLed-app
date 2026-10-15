@@ -331,12 +331,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     usuarios: [],
     jornadas: [],
     compras: [],
+    encargos: [],
     contaMes: null,
     importando: false,
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -573,6 +574,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       render({preservar:true});
       aplicarMigraciones();
     });
+    db.collection('encargos').orderBy('creadoEn','desc').limit(300).onSnapshot(function(snap){
+      state.encargos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      render({preservar:true});
+    }, function(){ state.encargos = []; });
     db.collection('jornadas').orderBy('iniciadaEn','desc').limit(60).onSnapshot(function(snap){
       state.jornadas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render({preservar:true});
@@ -2034,19 +2039,25 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
   }
 
+  function botonEncargos(){
+    var n = encargosPendientes(null).length;
+    return '<button class="btn '+(n?'btn-primary':'btn-ghost')+' btn-block" style="margin-bottom:12px;" data-action="abrir-encargos">📦 Encargos'+(n?(' · '+n+' pendiente'+(n===1?'':'s')):'')+'</button>';
+  }
   function renderVender(){
     var jornada = state.editandoVenta ? null : miJornada();
     if(!state.editandoVenta && !jornada){
       // Sin ruta iniciada no se puede vender
       var abiertasOtros = state.jornadas.filter(function(j){ return j.estado==='abierta'; });
-      return '<h2 class="section-title">Elige la ruta para empezar</h2>'+
+      return botonEncargos()+
+        '<h2 class="section-title">Elige la ruta para empezar</h2>'+
         '<div class="small muted" style="margin-bottom:12px;">Para vender y anotar gastos primero inicia la ruta. Al terminar la cierras y te muestra el balance.</div>'+
         (state.rutas.length ? state.rutas.map(function(r){
           var otros = abiertasOtros.filter(function(j){ return j.rutaId===r.id; });
           var nCli = state.clientes.filter(function(c){ return c.rutaId===r.id; }).length;
           return '<div class="card row between">'+
             '<div><div class="product-name">'+esc(r.nombre)+'</div>'+
-              '<div class="small muted">'+nCli+' cliente(s)'+(otros.length?(' · En ruta: '+otros.map(function(j){ return esc(j.iniciadaPorNombre||''); }).join(', ')):'')+'</div></div>'+
+              '<div class="small muted">'+nCli+' cliente(s)'+(otros.length?(' · En ruta: '+otros.map(function(j){ return esc(j.iniciadaPorNombre||''); }).join(', ')):'')+'</div>'+
+              avisoEncargosRuta(r.id)+'</div>'+
             '<button class="btn btn-primary" data-action="iniciar-ruta" data-id="'+r.id+'">Iniciar ruta</button>'+
           '</div>';
         }).join('') : '<div class="empty">No hay rutas creadas. El administrador las crea en Clientes.</div>');
@@ -2138,11 +2149,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">Iniciada '+horaCorta(jornada.iniciadaEn)+' · '+rj.facturas+' factura(s) · <span class="mono">'+fmtCOP(rj.totalVendido)+'</span></div></div>'+
           '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta">Cerrar ruta</button>'+
         '</div>'+
+        avisoEncargosRuta(jornada.rutaId)+
         ((state.isAdmin && ventasSinSalida().length) ?
           '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="abrir-incluir-facturas">+ Incluir facturas hechas antes ('+ventasSinSalida().length+')</button>' : '')+
       '</div>';
     }
-    return bannerEdicion + bannerJornada + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
+    return (state.editandoVenta ? '' : botonEncargos()) + bannerEdicion + bannerJornada + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
       '<h2 class="section-title">Productos</h2>' +
       '<div class="card">'+productosHtml+'</div>';
   }
@@ -2299,6 +2311,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       grupos + sinRutaHtml +
       '<button class="btn btn-primary btn-block" data-action="abrir-nuevo-cliente" style="margin-top:12px;">+ Nuevo cliente</button>';
   }
+  // ---------- ENCARGOS (cosas que no son del inventario y que un cliente pidió conseguir) ----------
+  function encargosPendientes(rutaId){
+    return state.encargos.filter(function(e){
+      if(e.estado==='entregado') return false;
+      if(!rutaId) return true;
+      var c = clienteById(e.clienteId);
+      return (c ? c.rutaId : e.rutaId) === rutaId;
+    });
+  }
+  function avisoEncargosRuta(rutaId){
+    var n = encargosPendientes(rutaId).length;
+    return n ? '<button class="link-btn" style="padding:0;margin-top:6px;color:var(--amber);font-weight:700;text-align:left;display:block;" data-action="abrir-encargos">📦 Esta ruta tiene '+n+' encargo'+(n===1?'':'s')+' pendiente'+(n===1?'':'s')+'</button>' : '';
+  }
+
   // Última compra de un cliente (la factura más reciente)
   function ultimaCompra(clienteId){
     var u = null;
@@ -2768,6 +2794,45 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='encargos'){
+      var me = state.modal;
+      var pend = encargosPendientes(null).slice().sort(function(a,b){
+        var ra = rutaById((clienteById(a.clienteId)||{}).rutaId || a.rutaId), rb = rutaById((clienteById(b.clienteId)||{}).rutaId || b.rutaId);
+        return String(ra?ra.nombre:'zz').localeCompare(String(rb?rb.nombre:'zz')) || String(a.creadoEn).localeCompare(String(b.creadoEn));
+      });
+      var entregados = state.encargos.filter(function(e){ return e.estado==='entregado'; }).slice(0, 15);
+      var filaE = function(e, pendiente){
+        var c = clienteById(e.clienteId) || {}; var ru = rutaById(c.rutaId || e.rutaId);
+        return '<div class="list-item">'+
+          '<div class="row between" style="align-items:flex-start;gap:8px;">'+
+            '<div style="min-width:0;"><div class="product-name">'+esc(c.nombre || e.clienteNombre || '')+(ru?(' <span class="small muted">· '+esc(ru.nombre)+'</span>'):'')+'</div>'+
+              '<div style="white-space:pre-wrap;margin:4px 0;">'+esc(e.texto||'')+'</div>'+
+              '<div class="small muted">'+esc(new Date(e.creadoEn).toLocaleDateString('es-CO'))+' · '+esc(e.creadoPorNombre||'')+
+                (!pendiente && e.entregadoEn ? (' · entregado el '+esc(new Date(e.entregadoEn).toLocaleDateString('es-CO'))) : '')+'</div></div>'+
+            '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">'+
+              (pendiente ? '<button class="btn btn-sm btn-primary" data-action="encargo-entregado" data-id="'+e.id+'">✓ Entregado</button>' : '')+
+              (state.isAdmin ? '<button class="btn btn-sm btn-ghost" data-action="eliminar-encargo" data-id="'+e.id+'">🗑</button>' : '')+
+            '</div>'+
+          '</div></div>';
+      };
+      html = '<h3>📦 Encargos</h3>'+
+        (me.nuevo ?
+          '<div class="card" style="margin-bottom:12px;">'+
+            '<div class="field"><label>Cliente</label><select id="enc-cliente"><option value="">Elige el cliente…</option>'+
+              state.clientes.slice().sort(function(a,b){ return String(a.nombre).localeCompare(String(b.nombre)); }).map(function(c){
+                var ru = rutaById(c.rutaId);
+                return '<option value="'+c.id+'"'+(me.clienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(ru?(' · '+esc(ru.nombre)):'')+'</option>';
+              }).join('')+
+            '</select></div>'+
+            '<div class="field"><label>¿Qué encargó?</label><textarea id="enc-texto" rows="4" placeholder="Ej: un probador de bombillos, 2 manubrios para Pulsar 200…">'+esc(me.texto||'')+'</textarea></div>'+
+            '<div class="row" style="gap:8px;"><button class="btn btn-primary" style="flex:1" data-action="guardar-encargo">Guardar encargo</button>'+
+            '<button class="btn btn-ghost" data-action="cancelar-encargo">Cancelar</button></div>'+
+          '</div>'
+          : '<button class="btn btn-primary btn-block" style="margin-bottom:12px;" data-action="nuevo-encargo">+ Nuevo encargo</button>')+
+        '<div class="small muted" style="margin-bottom:6px;">Pendientes ('+pend.length+')</div>'+
+        (pend.length ? pend.map(function(e){ return filaE(e, true); }).join('') : '<div class="empty" style="padding:16px;">No hay encargos pendientes.</div>')+
+        (entregados.length ? '<div class="small muted" style="margin:14px 0 6px;">Entregados recientes</div>'+entregados.map(function(e){ return filaE(e, false); }).join('') : '')+
+        '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="cerrar-modal">Cerrar</button>';
     } else if(state.modal.type==='ver-pdf'){
       var vp = state.modal;
       html = '<h3>Cuenta de cobro #'+esc(vp.venta.numero)+' · '+esc(vp.venta.clienteNombre||'')+'</h3>'+
@@ -3139,7 +3204,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(!rIni) return;
       if(miJornada()){ toast('Ya tienes una ruta abierta'); return; }
       if(!confirm('¿Iniciar '+rIni.nombre+'?')) return;
-      iniciarRuta(id); render(); window.scrollTo(0,0); toast(rIni.nombre+' iniciada');
+      iniciarRuta(id); render(); window.scrollTo(0,0);
+      var nEnc = encargosPendientes(id).length;
+      toast(rIni.nombre+' iniciada'+(nEnc?(' · 📦 Esta ruta tiene '+nEnc+' encargo'+(nEnc===1?'':'s')+' pendiente'+(nEnc===1?'':'s')):''));
     }
     else if(action==='cerrar-ruta'){
       var jc = miJornada(); if(!jc) return;
@@ -3160,6 +3227,30 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
     else if(action==='abrir-cobros'){ avisarCobros(true); }
+    else if(action==='abrir-encargos'){ state.modal = {type:'encargos'}; render(); }
+    else if(action==='nuevo-encargo'){ state.modal.nuevo = true; state.modal.clienteId = state.selectedClienteId || ''; render(); }
+    else if(action==='cancelar-encargo'){ state.modal.nuevo = false; state.modal.texto = ''; render(); }
+    else if(action==='guardar-encargo'){
+      var cliE = clienteById(document.getElementById('enc-cliente').value);
+      var txtE = document.getElementById('enc-texto').value.trim();
+      if(!cliE){ toast('Elige el cliente'); return; }
+      if(!txtE){ toast('Escribe qué encargó'); return; }
+      enSegundoPlano(setDoc(doc(collection(fs, 'encargos')), {
+        clienteId:cliE.id, clienteNombre:cliE.nombre, rutaId:cliE.rutaId||null, texto:txtE, estado:'pendiente',
+        creadoEn:todayISO(), creadoPor:state.auth.user.uid, creadoPorNombre:nombreUsuario()
+      }));
+      state.modal.nuevo = false; state.modal.texto = ''; render(); toast('Encargo guardado');
+    }
+    else if(action==='encargo-entregado'){
+      var eE = state.encargos.find(function(x){ return x.id===id; }); if(!eE) return;
+      if(!confirm('¿Marcar como entregado el encargo de '+(eE.clienteNombre||'')+'?')) return;
+      enSegundoPlano(updateDoc(doc(fs, 'encargos/'+id), { estado:'entregado', entregadoEn:todayISO(), entregadoPor:state.auth.user.uid, entregadoPorNombre:nombreUsuario() }));
+      toast('Encargo entregado');
+    }
+    else if(action==='eliminar-encargo'){
+      if(!confirm('¿Borrar este encargo?')) return;
+      enSegundoPlano(deleteDoc(doc(fs, 'encargos/'+id)));
+    }
     else if(action==='abrir-pedido'){ state.pedido = { cant:{} }; render(); window.scrollTo(0,0); }
     else if(action==='cerrar-pedido'){
       if(lineasPedido().length && !confirm('¿Salir del pedido? Las cantidades se borran.')) return;
@@ -3536,6 +3627,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   });
 
   document.addEventListener('input', function(e){
+    if(e.target.id==='enc-texto' && state.modal && state.modal.type==='encargos'){ state.modal.texto = e.target.value; return; }
     if(e.target.classList && e.target.classList.contains('pd-cant') && state.pedido){
       var vP = Math.max(0, Math.floor(Number(e.target.value)||0));
       state.pedido.cant[e.target.getAttribute('data-pk')] = vP || '';
@@ -3609,6 +3701,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         return;
       }
     }
+    if(e.target.id==='enc-cliente' && state.modal && state.modal.type==='encargos'){ state.modal.clienteId = e.target.value; return; }
     if(e.target.id==='sd-venta' && state.modal && state.modal.type==='soporte-dian'){ state.modal.ventaId = e.target.value; render(); return; }
     if(e.target.id==='rut-input'){
       var fr = e.target.files && e.target.files[0]; e.target.value = '';
