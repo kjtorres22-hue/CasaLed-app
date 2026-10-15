@@ -186,6 +186,13 @@
     margin-top:10px; color:var(--text);
   }
   .list-item{ padding:11px 0; border-bottom:1px solid var(--border); }
+  .zona-pegar{ min-height:110px; border:2px dashed var(--amber); border-radius:14px; padding:16px; text-align:center;
+    color:var(--muted); font-size:14px; background:var(--panel-2); outline:none; -webkit-user-select:text; user-select:text; }
+  .zona-pegar:empty:before{ content:attr(data-ph); }
+  .linea-compra{ padding:10px; border:1px solid var(--border); border-radius:12px; margin-bottom:8px; }
+  .linea-compra.revisar{ border-color:var(--amber); }
+  .linea-compra.ignorada{ opacity:.55; }
+  .linea-compra select, .linea-compra input{ padding:8px 10px; font-size:14px; }
   .list-item:last-child{ border-bottom:none; }
   .badge{ font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
   .badge-entrada{ background:rgba(52,211,153,.15); color:var(--green); }
@@ -266,6 +273,7 @@
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
 import { generarFacturaPDF } from './factura-pdf.js';
+import { leerPDF, textoAPaginas, parsearFactura } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -322,7 +330,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -1269,6 +1277,248 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     return new File([base64ABytes(trozos.join(''))], c.nombreArchivo || ('compra-'+c.id+'.pdf'), {type:c.tipoArchivo||'application/pdf'});
   }
+  // ---------- AGREGAR FACTURA DE COMPRA (pegar → leer → revisar → aplicar) ----------
+  // Código del proveedor → producto. 'ignorar' = no es de mi inventario. Termina en * = empieza por.
+  var MAPEO_COMPRAS = {
+    'M4PLUSCOB':'motoled-6000lm', 'M4PLUSCSP':'motoled-8000lm', 'H4-4MTCOBAC':'ceramico-h4-triceta',
+    '1159-06-FL':'direccional-flash-naranja', '1159-00-FL':'direccional-flash-blanco',
+    '1159-06':'direccional-fijo-naranja', '1159-00':'direccional-fijo-blanco',
+    'M2PRO-H4':'motoled-10000lm', 'H4-YY-COB':'ignorar', 'M4PROH4':'motoled-16000lm', 'MI45H4':'mi45-10000lm-par',
+    'BA20DM4TCCOBAC':'ceramico-ba20d', '115904':'stop-flash', '115900':'stop-flash-blanco',
+    'T10-FIJO-*':'t10-fijo-unicolor', 'T10-FLASH-*':'t10-flash-unicolor', 'T10-RGB':'t10-rgb-multifuncion',
+    'P15D-3MTC-COB-AC':'ceramico-p15-6-10w', '3021':'cargador-usb-doble',
+    '5S9-17641-09':'correa-bws', '23100-KEC4-COE':'correa-agility',
+    'ZXD-112':'direccional-diamante-cristal', 'ZXD-14':'direccional-tipo-hoja', 'ZXD-09MINI':'direccional-flecha-mini',
+    'ZXD-20-Y':'direccional-lineal-fija', 'ZXD-04-Y':'direccional-lineal-secuencial', 'LT001':'direccional-ojo-aguila',
+    'ZXD-58-Y':'direccional-tipo-bala',
+    'FX-3M-SYC-4LED':'exploradora-lupa-federal', 'JRY-10-MINI':'exploradora-foco-lupa-mini',
+    'XK-D3M-6LED':'exploradora-lineal-federal', 'TD35-MINI-1V1':'exploradora-minidriving', 'TD35-MINI-B':'exploradora-minieco',
+    'MTY20W1V1':'exploradora-buho-par', 'JM-50W':'exploradora-wall-e-par',
+    'MODULED-*':'modulos-led-unicolor', 'NK251':'interruptor-2funciones-pack', 'SW-3G':'interruptor-3funciones-manillar-pack',
+    'SW-MTL':'interruptor-4funciones', 'SWLED*':'interruptor-led-2funciones', 'SW-ESP':'interruptor-3funciones-espejo',
+    'NK218':'interruptor-3funciones-manillar', 'DD-R59':'stop-lujo-ns200-rgb'
+  };
+  // Cuántas unidades del proveedor trae cada producto (paquete x10, tira x10…)
+  function factorProducto(p){
+    var m = p && String(p.nombre||'').match(/\b(?:paquete|tira|caja|pack|bolsa)\s*(?:x|de)\s*(\d+)/i);
+    return m ? Math.max(1, Number(m[1])) : 1;
+  }
+  var COLORES_COMPRA = [
+    [/\bBLANC[OA]S?\b/, ['Blanco']], [/\bAZUL(ES)?\b/, ['Azul']], [/\bROJ[OA]S?\b/, ['Rojo']], [/\bVERDES?\b/, ['Verde']],
+    [/\bMORAD[OA]S?\b/, ['Morado']], [/\b(AMARILL[OA]S?|NARANJAS?|AMBAR)\b/, ['Amarillo','Naranja']]
+  ];
+  var COLOR_SUFIJO = { '00':'Blanco', '04':'Rojo', '05':'Azul', '06':'Amarillo', '07':'Verde', '08':'Morado' };
+  function detectarColor(p, l){
+    if(!p || !p.colores || !p.colores.length) return '';
+    var d = String(l.descripcion||'').toUpperCase();
+    for(var i = 0; i < COLORES_COMPRA.length; i++){
+      if(COLORES_COMPRA[i][0].test(d)){
+        var c = COLORES_COMPRA[i][1].find(function(x){ return p.colores.indexOf(x)>-1; });
+        if(c) return c;
+      }
+    }
+    var suf = String(l.codigo||'').match(/-(\d\d)$/);
+    if(suf && COLOR_SUFIJO[suf[1]] && p.colores.indexOf(COLOR_SUFIJO[suf[1]])>-1) return COLOR_SUFIJO[suf[1]];
+    return '';
+  }
+  function normTxt(t){ return String(t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
+  var PALABRAS_VACIAS = {bombillo:1, led:1, de:1, para:1, con:1, tipo:1, el:1, la:1, y:1, x:1, par:1, paquete:1, x10:1, unidad:1};
+  function sugerirPorNombre(desc){
+    var w = normTxt(desc).split(' ').filter(function(x){ return x.length>1 && !PALABRAS_VACIAS[x]; });
+    if(!w.length) return '';
+    var mejor = '', puntos = 0;
+    state.productos.forEach(function(p){
+      var pw = normTxt(p.nombre).split(' ');
+      var n = w.filter(function(x){ return pw.indexOf(x)>-1; }).length;
+      if(n > puntos){ puntos = n; mejor = p.id; }
+    });
+    return puntos >= 2 ? mejor : '';
+  }
+  function productoParaCodigo(codigo, desc){
+    var aprendido = (state.config && state.config.mapeoCompras) || {};
+    var cod = String(codigo||'').toUpperCase();
+    var valido = function(id){ return id==='ignorar' || !!productoById(id); };
+    if(cod && aprendido[cod] && valido(aprendido[cod])) return { id: aprendido[cod], origen: 'aprendido' };
+    if(cod && MAPEO_COMPRAS[cod] && valido(MAPEO_COMPRAS[cod])) return { id: MAPEO_COMPRAS[cod], origen: 'mapa' };
+    var pref = Object.keys(MAPEO_COMPRAS).find(function(k){ return k.slice(-1)==='*' && cod.indexOf(k.slice(0,-1))===0; });
+    if(pref && valido(MAPEO_COMPRAS[pref])) return { id: MAPEO_COMPRAS[pref], origen: 'mapa' };
+    var sug = sugerirPorNombre(desc);
+    return { id: sug, origen: sug ? 'sugerido' : '' };
+  }
+  // Rellena color, cantidad a sumar y costo nuevo según el producto elegido.
+  function prepararLineaCompra(l){
+    var p = (l.productoId && l.productoId!=='ignorar' && l.productoId!=='nuevo') ? productoById(l.productoId) : null;
+    var f = p ? factorProducto(p) : 1;
+    l.factor = f;
+    l.color = p ? detectarColor(p, l) : '';
+    l.stock = Math.round((Number(l.cantidad)||0) / f * 100) / 100;
+    if(Math.abs(l.stock - Math.round(l.stock)) < 0.001) l.stock = Math.round(l.stock);
+    l.costo = Math.round((Number(l.precio)||0) * f);
+  }
+  function normProveedor(t){ return normTxt(t).replace(/\b(s a s|sas|ltda|s a|eu|cia|y)\b/g,' ').replace(/\s+/g,' ').trim(); }
+  function buscarCompraDuplicada(proveedor, numero){
+    var n = String(numero||'').replace(/\D/g,'').replace(/^0+/,'');
+    if(!n) return null;
+    var pv = normProveedor(proveedor);
+    return state.compras.find(function(c){
+      if(String(c.numero||'').replace(/\D/g,'').replace(/^0+/,'') !== n) return false;
+      var cp = normProveedor(c.proveedor);
+      return !pv || !cp || cp.indexOf(pv)>-1 || pv.indexOf(cp)>-1 || cp.split(' ')[0]===pv.split(' ')[0];
+    }) || null;
+  }
+  async function procesarEntradaCompra(entrada){
+    if(!state.modal || state.modal.type!=='pegar-compra') state.modal = {type:'pegar-compra'};
+    state.modal.leyendo = true; state.modal.error = ''; render();
+    try{
+      var res, archivo = entrada.file || null, esFoto = false;
+      if(archivo && (/pdf/i.test(archivo.type) || /\.pdf$/i.test(archivo.name||''))){
+        res = parsearFactura(await leerPDF(await archivo.arrayBuffer()));
+      } else if(archivo && /^image\//.test(archivo.type)){
+        esFoto = true; res = { proveedor:'', numero:'', fecha:'', total:0, lineas:[], suma:0 };
+      } else {
+        var texto = entrada.texto != null ? entrada.texto : (archivo ? await archivo.text() : '');
+        if(!String(texto).trim()){ throw {code:'vacio'}; }
+        res = parsearFactura(textoAPaginas(texto));
+        if(!archivo) archivo = new File([texto], 'factura-compra'+(res.numero?('-'+res.numero.replace(/\W+/g,'')):'')+'.txt', {type:'text/plain'});
+      }
+      var lineas = res.lineas.map(function(l){
+        var m = l.repetida ? { id:'ignorar', origen:'repetida' } : productoParaCodigo(l.codigo, l.descripcion);
+        var nl = Object.assign({}, l, { productoId: m.id, origen: m.origen });
+        prepararLineaCompra(nl);
+        return nl;
+      });
+      var dup = buscarCompraDuplicada(res.proveedor, res.numero);
+      state.modal = {
+        type:'revisar-compra', archivo:archivo, esFoto:esFoto, duplicada:dup,
+        cab:{ proveedor:res.proveedor || (dup&&dup.proveedor) || '', numero:res.numero||'', fecha:res.fecha||fechaLocalISO(todayISO()), total:res.total||res.suma||0 },
+        suma:res.suma, lineas:lineas, actualizarCostos: lineas.length>0, sumarStock: lineas.length>0 && !dup
+      };
+      render();
+    }catch(err){
+      console.error(err);
+      state.modal = {type:'pegar-compra', error: err && err.code==='vacio' ? 'No llegó nada. Copia la factura y vuelve a intentar.' :
+        'No pude leer ese archivo. Prueba copiando el texto de la factura y pegándolo aquí.'};
+      render();
+    }
+  }
+  async function pegarDesdePortapapeles(){
+    try{
+      if(navigator.clipboard && navigator.clipboard.read){
+        var items = await navigator.clipboard.read();
+        for(var i = 0; i < items.length; i++){
+          var tipos = items[i].types || [];
+          var tPdf = tipos.find(function(t){ return /pdf/i.test(t); });
+          var tImg = tipos.find(function(t){ return /^image\//.test(t); });
+          if(tPdf){ var bp = await items[i].getType(tPdf); return procesarEntradaCompra({file:new File([bp], 'factura-compra.pdf', {type:'application/pdf'})}); }
+          if(tipos.indexOf('text/plain')>-1){ var bt = await items[i].getType('text/plain'); return procesarEntradaCompra({texto: await bt.text()}); }
+          if(tImg){ var bi = await items[i].getType(tImg); return procesarEntradaCompra({file:new File([bi], 'factura-compra.'+(tImg.split('/')[1]||'png'), {type:tImg})}); }
+        }
+      }
+      if(navigator.clipboard && navigator.clipboard.readText){
+        var tx = await navigator.clipboard.readText();
+        if(tx && tx.trim()) return procesarEntradaCompra({texto: tx});
+      }
+      toast('El portapapeles está vacío o el celular no lo deja leer. Toca el recuadro y elige "Pegar".');
+    }catch(e){
+      toast('Toca el recuadro punteado y elige "Pegar".');
+    }
+  }
+  function aplicarCompra(){
+    var m = state.modal; if(!m || m.type!=='revisar-compra' || m.aplicando) return;
+    var cab = m.cab;
+    if(!String(cab.proveedor||'').trim()){ toast('Escribe el proveedor'); return; }
+    if(!cab.fecha){ toast('Escribe la fecha'); return; }
+    var activas = m.lineas.filter(function(l){ return l.productoId && l.productoId!=='ignorar'; });
+    var sinAsignar = m.lineas.filter(function(l){ return !l.productoId; });
+    var faltaColor = activas.filter(function(l){ var p = productoById(l.productoId); return p && p.colores && p.colores.length && !l.color && m.sumarStock; });
+    if(faltaColor.length){ toast('Elige el color de: '+faltaColor.map(function(l){ return l.codigo||l.descripcion; }).join(', ')); return; }
+    if(sinAsignar.length && !confirm(sinAsignar.length+' producto(s) sin asignar no se tendrán en cuenta. ¿Seguir?')) return;
+    if(m.duplicada && m.sumarStock && !confirm('Esta factura ya estaba registrada. Si su mercancía ya está en el inventario, se sumaría dos veces. ¿Sumar de todas formas?')) return;
+    if(!m.sumarStock && !m.actualizarCostos && activas.length && !confirm('No se van a actualizar costos ni sumar inventario; solo se guarda la factura en la carpeta. ¿Seguir?')) return;
+
+    var cid = m.duplicada ? m.duplicada.id : nuevoId('compras');
+    var notaMov = 'Compra '+cab.proveedor+(cab.numero?(' N.° '+cab.numero):'');
+    var b = writeBatch(fs); var ops = 0;
+    var porProducto = {}; var nuevos = 0; var mapeo = [];
+    var items = m.lineas.map(function(l){
+      var pid = l.productoId || '';
+      if(pid==='nuevo'){
+        pid = nuevoId('productos'); nuevos++;
+        b.set(doc(fs, 'productos/'+pid), {
+          nombre: tituloCompra(l.descripcion || l.codigo), costoCompra: m.actualizarCostos ? Math.round(l.precio) : 0, costoVenta: 0,
+          stock: m.sumarStock ? Number(l.cantidad)||0 : 0, imagenUrl: null, pendiente: true, creadoEn: todayISO(), orden: Date.now() + nuevos
+        }); ops++;
+        if(m.sumarStock){
+          b.set(doc(collection(fs,'movimientos')), { tipo:'entrada', productoId:pid, productoNombre:tituloCompra(l.descripcion||l.codigo), cantidad:Number(l.cantidad)||0,
+            nota:notaMov, compraId:cid, fecha:todayISO(), usuarioId:state.auth.user.uid, usuarioNombre:nombreUsuario() }); ops++;
+        }
+        if(l.codigo) mapeo.push([l.codigo, pid]);
+      } else if(pid && pid!=='ignorar'){
+        var acc = porProducto[pid] || (porProducto[pid] = { stock:0, porColor:{}, costo:null, lineas:[] });
+        var cant = Number(l.stock)||0;
+        acc.stock += cant;
+        if(l.color) acc.porColor[l.color] = (acc.porColor[l.color]||0) + cant;
+        if(Number(l.costo) > 0) acc.costo = Number(l.costo);
+        acc.lineas.push(l);
+        if(l.codigo) mapeo.push([l.codigo, pid]);
+      } else if(pid==='ignorar' && l.codigo && !l.repetida){ mapeo.push([l.codigo, 'ignorar']); }
+      var pr = productoById(pid);
+      return { codigo:l.codigo||'', descripcion:l.descripcion||'', cantidad:Number(l.cantidad)||0, precio:Number(l.precio)||0, subtotal:Number(l.subtotal)||0,
+        productoId: (l.productoId==='ignorar'||!l.productoId) ? (l.productoId||'') : pid, productoNombre: pr ? pr.nombre : (l.productoId==='nuevo' ? tituloCompra(l.descripcion||l.codigo) : ''),
+        color:l.color||'', stockSumado: (m.sumarStock && l.productoId && l.productoId!=='ignorar') ? (l.productoId==='nuevo' ? Number(l.cantidad)||0 : Number(l.stock)||0) : 0,
+        costo: Number(l.costo)||0, repetida: !!l.repetida };
+    });
+    var cambiosCosto = 0;
+    Object.keys(porProducto).forEach(function(pid){
+      var acc = porProducto[pid]; var p = productoById(pid); if(!p) return;
+      var args = [];
+      if(m.sumarStock && acc.stock){
+        args.push(new FieldPath('stock'), increment(acc.stock));
+        if(p.colores && p.colores.length) Object.keys(acc.porColor).forEach(function(c){ args.push(new FieldPath('stockPorColor', c), increment(acc.porColor[c])); });
+      }
+      if(m.actualizarCostos && acc.costo != null && Number(p.costoCompra) !== acc.costo){ args.push(new FieldPath('costoCompra'), acc.costo); cambiosCosto++; }
+      if(args.length){ b.update(doc(fs, 'productos/'+pid), ...args); ops++; }
+      if(m.sumarStock){
+        acc.lineas.forEach(function(l){
+          if(!(Number(l.stock) > 0)) return;
+          b.set(doc(collection(fs,'movimientos')), { tipo:'entrada', productoId:pid, productoNombre:p.nombre+(l.color?(' - '+l.color):''), cantidad:Number(l.stock),
+            nota:notaMov, compraId:cid, fecha:todayISO(), usuarioId:state.auth.user.uid, usuarioNombre:nombreUsuario() }); ops++;
+        });
+      }
+    });
+    if(mapeo.length){
+      var margs = [];
+      mapeo.forEach(function(x){ margs.push(new FieldPath('mapeoCompras', String(x[0]).toUpperCase()), x[1]); });
+      b.update(doc(fs, 'config/general'), ...margs); ops++;
+    }
+    var datosCompra = { proveedor:String(cab.proveedor).trim(), numero:String(cab.numero||'').trim(), fecha:cab.fecha, total:Number(cab.total)||0,
+      items:items, aplicada:{ costos:!!m.actualizarCostos, inventario:!!m.sumarStock, en:todayISO(), por:nombreUsuario() } };
+    if(!m.duplicada){ datosCompra.creadoEn = todayISO(); datosCompra.partes = 0; datosCompra.notas = ''; }
+    b.set(doc(fs, 'compras/'+cid), datosCompra, {merge:true}); ops++;
+    if(ops > 480){ toast('La factura es muy larga (más de 200 productos). Divídela en dos.'); return; }
+    enSegundoPlano(b.commit());
+
+    var archivo = m.archivo;
+    var unidades = Object.keys(porProducto).reduce(function(s2,k){ return s2+porProducto[k].stock; },0);
+    var partesMsg = [];
+    if(m.sumarStock) partesMsg.push('+'+fmtNum(unidades)+' al inventario');
+    if(m.actualizarCostos && Object.keys(porProducto).length) partesMsg.push(cambiosCosto ? (cambiosCosto+' costo(s) actualizado(s)') : 'los costos ya estaban al día');
+    if(nuevos) partesMsg.push(nuevos+' producto(s) nuevo(s) para completar');
+    state.modal = null; render();
+    toast('Factura guardada'+(partesMsg.length?(' · '+partesMsg.join(' · ')):''));
+    if(archivo && !(m.duplicada && m.duplicada.partes && /text\/plain/.test(archivo.type))){
+      guardarArchivoCompra(cid, archivo).catch(function(err){
+        toast(err && err.code==='archivo-grande' ? 'La factura quedó registrada, pero el archivo es muy grande para guardarlo (máx. ~6 MB).' : mensajeError(err));
+      });
+    }
+  }
+  function tituloCompra(t){
+    t = String(t||'').trim();
+    if(t !== t.toUpperCase()) return t;
+    return t.toLowerCase().replace(/(^|\s)([a-záéíóúñ])/g, function(x, a, c){ return a + c.toUpperCase(); });
+  }
+  function fmtNum(n){ return (Math.round(Number(n)*100)/100).toLocaleString('es-CO'); }
+
   // ZIP sin compresión (los PDF y JPG ya vienen comprimidos)
   var TABLA_CRC = (function(){ var t = new Uint32Array(256); for(var n=0;n<256;n++){ var c=n; for(var k=0;k<8;k++) c = (c&1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1); t[n]=c>>>0; } return t; })();
   function crc32(bytes){ var c = 0xFFFFFFFF; for(var i=0;i<bytes.length;i++) c = TABLA_CRC[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
@@ -1813,7 +2063,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div class="small muted" style="margin-top:8px;">Se descarga un archivo .zip con cada factura en PDF y un resumen que abre en Excel, listo para el contador.</div>'+
       '</div>'+
       '<div class="row between" style="margin:18px 0 10px;"><h2 class="section-title" style="margin:0;">Facturas de compra</h2>'+
-        '<button class="btn btn-sm btn-primary" data-action="nueva-compra">+ Agregar</button></div>'+
+        '<button class="btn btn-sm btn-primary" data-action="agregar-factura-compra">+ Agregar factura</button></div>'+
       '<input id="compra-archivo-input" type="file" accept="application/pdf,image/*" style="display:none;">'+
       '<div class="card">'+comprasHtml+'</div>';
   }
@@ -2171,6 +2421,76 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='pegar-compra'){
+      var pm = state.modal;
+      html = '<h3>Agregar factura de compra</h3>'+
+        (pm.leyendo ? '<div class="empty" style="padding:26px 10px;">Leyendo la factura…</div>' :
+        '<div class="small muted" style="margin-bottom:10px;">Copia la factura (el PDF o su texto) y pégala aquí. La app lee los productos, actualiza los costos y suma las cantidades al inventario. Antes de guardar puedes revisar todo.</div>'+
+        '<div id="zona-pegar" class="zona-pegar" contenteditable="true" data-ph="Toca aquí y elige «Pegar»"></div>'+
+        (pm.error ? '<div class="small" style="color:var(--red);margin-top:8px;">'+esc(pm.error)+'</div>' : '')+
+        '<button class="btn btn-primary btn-block" style="margin-top:12px;padding:13px;" data-action="pegar-compra-portapapeles">📋 Pegar lo que copié</button>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="elegir-archivo-compra">📎 Elegir archivo (PDF o foto)</button>'+
+        '<input id="compra-pegar-input" type="file" accept="application/pdf,image/*,text/plain" style="display:none;">'+
+        '<div class="small muted" style="margin-top:12px;">Si es una foto, se guarda en la carpeta pero los productos no se pueden leer: para eso pega el PDF o el texto.</div>'+
+        '<div class="row" style="margin-top:12px;"><button class="btn btn-ghost" style="flex:1" data-action="compra-solo-archivar">Solo archivar (sin productos)</button>'+
+        '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button></div>');
+    } else if(state.modal.type==='revisar-compra'){
+      var rm2 = state.modal; var cab = rm2.cab;
+      var opcionesProd = state.productos.slice().sort(function(a,b){ return String(a.nombre).localeCompare(String(b.nombre)); });
+      var activasR = rm2.lineas.filter(function(l){ return l.productoId && l.productoId!=='ignorar'; });
+      var porRevisar = rm2.lineas.filter(function(l){ return !l.productoId || l.origen==='sugerido'; }).length;
+      var diferencia = Math.abs((Number(cab.total)||0) - (rm2.suma||0));
+      var lineasHtml = rm2.lineas.map(function(l, i){
+        var p = (l.productoId && l.productoId!=='ignorar' && l.productoId!=='nuevo') ? productoById(l.productoId) : null;
+        var clase = 'linea-compra'+((!l.productoId || l.origen==='sugerido') ? ' revisar' : '')+(l.productoId==='ignorar' ? ' ignorada' : '');
+        var sel = '<select id="rc-prod-'+i+'" data-li="'+i+'" data-campo="productoId">'+
+          '<option value=""'+(!l.productoId?' selected':'')+'>— Elige el producto —</option>'+
+          '<option value="ignorar"'+(l.productoId==='ignorar'?' selected':'')+'>No es de mi inventario (ignorar)</option>'+
+          '<option value="nuevo"'+(l.productoId==='nuevo'?' selected':'')+'>➕ Crear como producto nuevo</option>'+
+          opcionesProd.map(function(op){ return '<option value="'+op.id+'"'+(op.id===l.productoId?' selected':'')+'>'+esc(op.nombre||'Sin nombre')+'</option>'; }).join('')+
+        '</select>';
+        var colorSel = (p && p.colores && p.colores.length) ? '<select id="rc-color-'+i+'" data-li="'+i+'" data-campo="color" style="margin-top:6px;'+(l.color?'':'border-color:var(--red);')+'">'+
+          '<option value="">— Color —</option>'+p.colores.map(function(c){ return '<option value="'+esc(c)+'"'+(c===l.color?' selected':'')+'>'+esc(c)+'</option>'; }).join('')+'</select>' : '';
+        var detalle = '';
+        if(p){
+          detalle = '<div class="field-row" style="margin-top:6px;">'+
+            '<div class="field" style="margin:0;"><label>Suma al stock'+(l.factor>1?(' (÷'+l.factor+')'):'')+'</label><input id="rc-stock-'+i+'" type="number" inputmode="decimal" data-li="'+i+'" data-campo="stock" value="'+l.stock+'"></div>'+
+            '<div class="field" style="margin:0;"><label>Costo nuevo'+(l.factor>1?(' (×'+l.factor+')'):'')+'</label><input id="rc-costo-'+i+'" type="number" inputmode="numeric" data-li="'+i+'" data-campo="costo" value="'+l.costo+'"></div>'+
+          '</div>'+
+          '<div class="small muted" style="margin-top:4px;">Antes: costo '+fmtCOP(p.costoCompra||0)+' · stock '+fmtNum(p.stock||0)+'</div>';
+        } else if(l.productoId==='nuevo'){
+          detalle = '<div class="small muted" style="margin-top:4px;">Se crea «'+esc(tituloCompra(l.descripcion||l.codigo))+'» con costo '+fmtCOP(l.precio)+' y '+fmtNum(l.cantidad)+' en stock. Luego le pones precio de venta y foto.</div>';
+        }
+        return '<div class="'+clase+'">'+
+          '<div class="small muted">'+(l.codigo?('<span class="mono">'+esc(l.codigo)+'</span> · '):'')+fmtNum(l.cantidad)+' × '+fmtCOP(l.precio)+' = '+fmtCOP(l.subtotal)+
+            (l.repetida?' · <span style="color:var(--amber);">repetida (salto de hoja)</span>':'')+(l.origen==='sugerido'?' · <span style="color:var(--amber);">¿es este?</span>':'')+'</div>'+
+          '<div style="font-weight:600;font-size:13.5px;margin:3px 0 6px;">'+esc(l.descripcion||'')+'</div>'+
+          sel+colorSel+detalle+
+        '</div>';
+      }).join('');
+      html = '<h3>Revisar factura de compra</h3>'+
+        (rm2.duplicada ? '<div class="small" style="background:rgba(245,158,11,.12);border:1px solid var(--amber);border-radius:10px;padding:10px;margin-bottom:12px;">Esta factura ya estaba registrada'+
+          (rm2.duplicada.aplicada && rm2.duplicada.aplicada.inventario ? ' <strong>y su mercancía ya se sumó al inventario</strong>' : '')+
+          '. «Sumar al inventario» quedó apagado para no contar dos veces; los costos sí se pueden actualizar.</div>' : '')+
+        '<div class="field"><label>Proveedor</label><input id="rc-proveedor" value="'+esc(cab.proveedor||'')+'"></div>'+
+        '<div class="field-row">'+
+          '<div class="field"><label>N.° factura</label><input id="rc-numero" value="'+esc(cab.numero||'')+'"></div>'+
+          '<div class="field"><label>Fecha</label><input id="rc-fecha" type="date" value="'+esc(cab.fecha||'')+'"></div>'+
+        '</div>'+
+        '<div class="field"><label>Total de la factura</label><input id="rc-total" type="number" inputmode="numeric" value="'+esc(cab.total||'')+'"></div>'+
+        (rm2.lineas.length ?
+          '<div class="small" style="margin:-4px 0 12px;">'+rm2.lineas.length+' renglones leídos · suma '+fmtCOP(rm2.suma||0)+
+            (cab.total ? (diferencia <= Math.max(100, cab.total*0.001) ? ' <span style="color:var(--green);">✓ cuadra con el total</span>' : ' <span style="color:var(--red);">⚠ no cuadra con el total ('+fmtCOP(diferencia)+' de diferencia): revisa que no falte nada</span>') : '')+
+            (porRevisar ? '<br><span style="color:var(--amber);">'+porRevisar+' por revisar (borde naranja)</span>' : '')+'</div>'+
+          '<label class="row" style="gap:8px;margin-bottom:6px;"><input type="checkbox" id="rc-costos"'+(rm2.actualizarCostos?' checked':'')+' style="width:auto;"> <span>Actualizar costos de compra con los de esta factura</span></label>'+
+          '<label class="row" style="gap:8px;margin-bottom:12px;"><input type="checkbox" id="rc-sumar"'+(rm2.sumarStock?' checked':'')+' style="width:auto;"> <span>Sumar las cantidades al inventario</span></label>'+
+          lineasHtml
+        : '<div class="small muted" style="margin-bottom:12px;">'+(rm2.esFoto ? 'Es una foto: se guarda en la carpeta, pero no se pueden leer los productos. Para actualizar precios y cantidades, pega el PDF o el texto de la factura.' :
+            'No encontré productos en la factura (puede ser un PDF escaneado). Se puede guardar en la carpeta igual.')+'</div>')+
+        '<div class="row" style="margin-top:12px;position:sticky;bottom:-18px;background:var(--panel);padding:10px 0;">'+
+          '<button class="btn btn-primary" style="flex:1;padding:13px;" data-action="aplicar-compra">'+(activasR.length && rm2.sumarStock ? 'Guardar y sumar al inventario' : (activasR.length && rm2.actualizarCostos ? 'Guardar y actualizar costos' : 'Guardar en la carpeta'))+'</button>'+
+          '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
+        '</div>';
     } else if(state.modal.type==='compra'){
       var cm = state.modal.compra || {};
       html = '<h3>'+(cm.id?'Editar factura de compra':'Nueva factura de compra')+'</h3>'+
@@ -2430,7 +2750,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var ymC = state.contaMes || mesActual();
       prepararArchivo('Facturas de compra · '+nombreMes(ymC), paqueteComprasMes(ymC));
     }
-    else if(action==='nueva-compra'){ state.modal = {type:'compra', compra:{}}; render(); }
+    else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
+    else if(action==='agregar-factura-compra'){ state.modal = {type:'pegar-compra'}; render(); }
+    else if(action==='pegar-compra-portapapeles'){ await pegarDesdePortapapeles(); }
+    else if(action==='elegir-archivo-compra'){ var inpP = document.getElementById('compra-pegar-input'); if(inpP) inpP.click(); }
+    else if(action==='aplicar-compra'){ aplicarCompra(); }
     else if(action==='editar-compra'){
       var ce = state.compras.find(function(c){ return c.id===id; });
       if(ce){ state.modal = {type:'compra', compra:ce}; render(); }
@@ -2737,6 +3061,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   });
 
   document.addEventListener('input', function(e){
+    if(state.modal && state.modal.type==='revisar-compra'){
+      var liI = e.target.getAttribute && e.target.getAttribute('data-li');
+      if(liI != null){
+        var campoI = e.target.getAttribute('data-campo');
+        if(campoI==='stock' || campoI==='costo'){ state.modal.lineas[Number(liI)][campoI] = Number(e.target.value)||0; }
+        return;
+      }
+      var cabMap = {'rc-proveedor':'proveedor','rc-numero':'numero','rc-fecha':'fecha','rc-total':'total'};
+      if(cabMap[e.target.id]){ state.modal.cab[cabMap[e.target.id]] = e.target.id==='rc-total' ? (Number(e.target.value)||0) : e.target.value; return; }
+    }
     if(e.target.id==='rf-comentarios'){ state.checkoutComentarios = e.target.value; return; }
     if(e.target.id && e.target.id.indexOf('rf-nc-')===0 && state.modal){
       state.modal.nc = state.modal.nc || {};
@@ -2758,6 +3092,29 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   });
 
   document.addEventListener('change', async function(e){
+    if(state.modal && state.modal.type==='revisar-compra'){
+      var liC = e.target.getAttribute && e.target.getAttribute('data-li');
+      if(liC != null){
+        var lc = state.modal.lineas[Number(liC)]; var campoC = e.target.getAttribute('data-campo');
+        if(campoC==='productoId'){ lc.productoId = e.target.value; lc.origen = 'elegido'; prepararLineaCompra(lc); render({preservar:true}); }
+        else if(campoC==='color'){ lc.color = e.target.value; render({preservar:true}); }
+        return;
+      }
+      if(e.target.id==='rc-costos'){ state.modal.actualizarCostos = e.target.checked; render({preservar:true}); return; }
+      if(e.target.id==='rc-sumar'){ state.modal.sumarStock = e.target.checked; render({preservar:true}); return; }
+      if(e.target.id==='rc-proveedor' || e.target.id==='rc-numero'){
+        state.modal.cab.proveedor = document.getElementById('rc-proveedor').value;
+        state.modal.cab.numero = document.getElementById('rc-numero').value;
+        var dupN = buscarCompraDuplicada(state.modal.cab.proveedor, state.modal.cab.numero);
+        if(!!dupN !== !!state.modal.duplicada){ state.modal.duplicada = dupN; if(dupN) state.modal.sumarStock = false; render({preservar:true}); }
+        return;
+      }
+    }
+    if(e.target.id==='compra-pegar-input'){
+      var fp = e.target.files && e.target.files[0]; e.target.value = '';
+      if(fp) procesarEntradaCompra({file:fp});
+      return;
+    }
     if(e.target.id==='sel-cliente'){
       state.selectedClienteId = e.target.value || null;
       render();
@@ -2812,6 +3169,25 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       db.doc('usuarios/'+uidRol).update({rol:e.target.value});
       toast('Rol actualizado');
     }
+  });
+
+  // Pegar la factura en el recuadro punteado
+  document.addEventListener('paste', function(e){
+    var zona = e.target && e.target.closest && e.target.closest('#zona-pegar');
+    if(!zona || !state.modal || state.modal.type!=='pegar-compra' || !state.isAdmin) return;
+    e.preventDefault();
+    var cd = e.clipboardData; if(!cd) return;
+    var archivoP = null;
+    if(cd.files && cd.files.length) archivoP = cd.files[0];
+    else if(cd.items){
+      for(var i = 0; i < cd.items.length; i++){
+        if(cd.items[i].kind==='file'){ archivoP = cd.items[i].getAsFile(); if(archivoP) break; }
+      }
+    }
+    if(archivoP) return procesarEntradaCompra({file:archivoP});
+    var txt = cd.getData('text/plain');
+    if(txt && txt.trim()) return procesarEntradaCompra({texto:txt});
+    toast('No llegó nada. Copia la factura y vuelve a intentar.');
   });
 
   if('serviceWorker' in navigator && !USE_EMULATORS){
