@@ -751,6 +751,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     { id:'titular_rut', mensaje:'Titular de la cuenta de cobro: Kevin Joan Torres Daza', config:function(c){
       return c.empresaTitular ? {} : { empresaTitular:'Kevin Joan Torres Daza' };
     }},
+    // Interruptor LED 2 funciones por color: de los 150 había 50 rojos, 50 blancos y 50 azules
+    { id:'interruptor_led_colores', mensaje:'Interruptor LED 2 Funciones ahora va por colores (Azul, Blanco, Rojo)', producto:function(get){
+      var p = get('interruptor-led-2funciones'); if(!p || (p.colores && p.colores.length)) return null;
+      var st = Number(p.stock)||0, por;
+      if(st === 150) por = { Azul:50, Blanco:50, Rojo:50 };
+      else { var b = Math.floor(st/3); por = { Azul:b, Blanco:b, Rojo:st - 2*b }; }
+      return { id:p.id, data:{ colores:['Azul','Blanco','Rojo'], stockPorColor:por } };
+    }},
     { id:'eliminar_devil_lupa', mensaje:'Exploradora Devil Lupa eliminada', eliminar:['exploradora-devil-lupa'] },
     { id:'compra_motofox_39072', mensaje:'Factura de compra Moto Fox 39072 registrada (adjunta el PDF en Reportes → Facturas de compra)', compras:[
       { id:'motofox-39072', data:{ proveedor:'Importadora Moto Fox SAS', numero:'39072', fecha:'2026-10-05', total:18053064,
@@ -770,6 +778,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(productoById(pid)){ b.update(doc(fs, 'productos/'+pid), {costoCompra:m.costos[pid]}); n++; }
       });
       (m.compras||[]).forEach(function(c){ b.set(doc(fs, 'compras/'+c.id), c.data, {merge:true}); n++; });
+      if(m.producto){ var rp = m.producto(productoById); if(rp){ b.update(doc(fs, 'productos/'+rp.id), rp.data); n++; } }
       if(m.config){ var rc = m.config(state.config||{}); if(Object.keys(rc).length){ b.update(doc(fs, 'config/general'), rc); n++; } }
       (m.eliminar||[]).forEach(function(pid){
         if(productoById(pid)){ b.delete(doc(fs, 'productos/'+pid)); n++; }
@@ -1475,6 +1484,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     'exploradora-minieco':'TD35-MINI-B', 'exploradora-buho-par':'MTY20W1V1', 'exploradora-wall-e-par':'JM-50W',
     'modulos-led-unicolor|Azul':'MODULED-05', 'modulos-led-unicolor|Rojo':'MODULED-04', 'modulos-led-unicolor|Verde':'MODULED-07',
     'interruptor-2funciones-pack':'NK251', 'interruptor-3funciones-manillar-pack':'SW-3G', 'interruptor-4funciones':'SW-MTL',
+    'interruptor-led-2funciones|Azul':'SWLED05', 'interruptor-led-2funciones|Blanco':'SWLED00', 'interruptor-led-2funciones|Rojo':'SWLED04',
     'interruptor-3funciones-espejo':'SW-ESP', 'interruptor-3funciones-manillar':'NK218', 'stop-lujo-ns200-rgb':'DD-R59'
   };
   // El código del proveedor para un producto (y color): lo último aprendido de las facturas, si no, lo visto en la 39072.
