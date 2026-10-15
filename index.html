@@ -272,8 +272,8 @@
 </div>
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
-import { generarFacturaPDF, TITULO_DOC } from './factura-pdf.js';
-import { leerPDF, textoAPaginas, parsearFactura } from './compras-parser.js';
+import { generarFacturaPDF, generarSoporteDIAN, TITULO_DOC } from './factura-pdf.js';
+import { leerPDF, textoAPaginas, parsearFactura, leerRUT } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -330,7 +330,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -611,7 +611,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   function resumenJornada(j){
     var ventas = state.ventas.filter(function(v){ return v.jornadaId===j.id; }).sort(function(a,b){ return (a.numero||0)-(b.numero||0); });
     var gastos = state.gastos.filter(function(g){ return g.jornadaId===j.id; });
-    var r = { facturas:ventas.length, totalVendido:0, contado:0, credito:0, abonos:0, saldoPendiente:0,
+    var r = { facturas:ventas.length, totalVendido:0, contado:0, credito:0, abonos:0, saldoPendiente:0, efectivo:0, transferencia:0, sinMedio:0,
       unidades:0, totalGastos:0, productos:[], deudores:[], gastos:[], numeros:[] };
     var porProd = {};
     ventas.forEach(function(v){
@@ -621,6 +621,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         r.credito += t; r.abonos += Number(v.abono)||0; r.saldoPendiente += Number(v.saldo)||0;
         if((Number(v.saldo)||0) > 0) r.deudores.push({cliente:v.clienteNombre||'', numero:v.numero, saldo:Number(v.saldo)||0, total:t});
       } else { r.contado += t; }
+      var recibidoV = v.tipoPago==='credito' ? (Number(v.abono)||0) : t;
+      if(v.medioPago==='transferencia') r.transferencia += recibidoV;
+      else if(v.medioPago==='efectivo') r.efectivo += recibidoV;
+      else r.sinMedio += recibidoV;
       (v.items||[]).forEach(function(it){
         var k = it.nombre;
         if(!porProd[k]) porProd[k] = {nombre:it.nombre, cantidad:0, total:0};
@@ -631,7 +635,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     r.productos = Object.keys(porProd).map(function(k){ return porProd[k]; }).sort(function(a,b){ return b.cantidad-a.cantidad; });
     gastos.forEach(function(g){ r.totalGastos += Number(g.monto)||0; r.gastos.push({concepto:g.concepto, monto:Number(g.monto)||0, nota:g.nota||''}); });
     r.recibido = r.contado + r.abonos;
-    r.efectivoNeto = r.recibido - r.totalGastos;
+    // los gastos de ruta se pagan en efectivo; lo que llegó por transferencia ya está en la cuenta
+    r.efectivoNeto = r.efectivo + r.sinMedio - r.totalGastos;
     return r;
   }
   function ventasSinSalida(){
@@ -665,6 +670,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     L.push('Contado: '+fmtCOP(r.contado)+' · Crédito: '+fmtCOP(r.credito));
     L.push('Abonos recibidos: '+fmtCOP(r.abonos));
     L.push('*Dinero recibido: '+fmtCOP(r.recibido)+'*');
+    if(r.efectivo!=null){
+      L.push('  💵 Efectivo: '+fmtCOP((r.efectivo||0)+(r.sinMedio||0))+(r.sinMedio?(' (incluye '+fmtCOP(r.sinMedio)+' sin medio registrado)'):''));
+      L.push('  📲 Transferencia: '+fmtCOP(r.transferencia||0));
+    }
     L.push('Gastos: '+fmtCOP(r.totalGastos));
     L.push('*Efectivo a entregar: '+fmtCOP(r.efectivoNeto)+'*');
     L.push('*Quedaron debiendo: '+fmtCOP(r.saldoPendiente)+'*');
@@ -680,7 +689,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   var EMPRESA_DEFAULT = {
-    empresaNombre:'Casa LED', empresaTitular:'', empresaNit:'1.121.914.622-4', empresaDireccion:'Cl 3 sur #30b-30',
+    empresaNombre:'Casa LED', empresaTitular:'Kevin Joan Torres Daza', empresaNit:'1.121.914.622-4', empresaDireccion:'Cl 3 sur #30b-30',
     empresaCiudad:'Villavicencio, Meta', empresaTelefono:'311 409 3721', empresaEmail:'casaledvillao@gmail.com',
     empresaInstagram:'@Casaledvillao', empresaWeb:'casaled.co',
     notasFactura:'1) El cliente debe revisar que cada artículo corresponda a lo indicado en su pedido.\n2) Para hacer válida la garantía, conserve esta cuenta de cobro.'
@@ -736,6 +745,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(String(c.empresaNit||'').replace(/\D/g,'')==='1121914622') r.empresaNit = '1.121.914.622-4';
       if(c.notasFactura && /esta factura/i.test(c.notasFactura)) r.notasFactura = c.notasFactura.replace(/esta factura/gi, 'esta cuenta de cobro');
       return r;
+    }},
+    { id:'titular_rut', mensaje:'Titular de la cuenta de cobro: Kevin Joan Torres Daza', config:function(c){
+      return c.empresaTitular ? {} : { empresaTitular:'Kevin Joan Torres Daza' };
     }},
     { id:'eliminar_devil_lupa', mensaje:'Exploradora Devil Lupa eliminada', eliminar:['exploradora-devil-lupa'] },
     { id:'compra_motofox_39072', mensaje:'Factura de compra Moto Fox 39072 registrada (adjunta el PDF en Reportes → Facturas de compra)', compras:[
@@ -1032,6 +1044,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var tipoPago = state.checkoutPago || 'contado';
     var abono = tipoPago==='credito' ? Math.max(0, Math.min(total, Number(state.checkoutAbono)||0)) : total;
     var saldo = Math.max(0, total - abono);
+    var medioPago = abono > 0 ? (state.checkoutMedio || 'efectivo') : null;
 
     try{
       var reserva = await siguienteNumeroFactura();
@@ -1047,7 +1060,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         numero:numero, clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
         rutaId:(jornadaVenta?jornadaVenta.rutaId:(cliente.rutaId||null)), rutaNombre:(jornadaVenta?jornadaVenta.rutaNombre:(ruta?ruta.nombre:'')),
         jornadaId:jornadaVenta?jornadaVenta.id:null, items:items, total:total,
-        tipoPago:tipoPago, abono:abono, saldo:saldo, fecha:fecha,
+        tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago:medioPago, fecha:fecha,
         comentarios:(state.checkoutComentarios||'').trim(),
         vendedorId:state.auth.user.uid, vendedorNombre:nombreUsuario()
       };
@@ -1084,6 +1097,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.selectedClienteId = null;
       state.checkoutPago = 'contado';
       state.checkoutAbono = 0;
+      state.checkoutMedio = 'efectivo';
       state.checkoutComentarios = '';
       abrirFactura(Object.assign({id:ventaRef.id}, ventaDoc), cliente, true);
     }catch(e){
@@ -1144,7 +1158,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var cambios = {
       clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
       rutaId:cliente.rutaId||orig.rutaId||null, rutaNombre:ruta?ruta.nombre:(orig.rutaNombre||''),
-      items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo,
+      items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago: abono > 0 ? (state.checkoutMedio || 'efectivo') : null,
       comentarios:(state.checkoutComentarios||'').trim(),
       editadoEn:fecha, editadoPor:nombreUsuario()
     };
@@ -1153,7 +1167,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var actualizada = Object.assign({}, orig, cambios);
     state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
-    state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutComentarios = '';
+    state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutMedio = 'efectivo'; state.checkoutComentarios = '';
     abrirFactura(actualizada, cliente, false);
     state.modal.editada = true; render();
     toast('Factura #'+orig.numero+' actualizada');
@@ -1266,10 +1280,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(pago){
       if(pago.tipo==='credito'){
         lineas.push('Forma de pago: *CRÉDITO*');
-        lineas.push('Abono: '+fmtCOP(pago.abono||0));
+        lineas.push('Abono: '+fmtCOP(pago.abono||0)+((pago.abono>0 && pago.medio)?(' ('+nombreMedio(pago.medio)+')'):''));
         lineas.push('*Saldo pendiente: '+fmtCOP(Math.max(0,total-(pago.abono||0)))+'*');
       } else {
-        lineas.push('Forma de pago: *CONTADO* ✅ Pagado');
+        lineas.push('Forma de pago: *CONTADO* ✅ Pagado'+(pago.medio?(' en '+nombreMedio(pago.medio).toLowerCase()):''));
       }
     }
     if(pago && pago.comentarios){
@@ -1280,6 +1294,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     lineas.push('¡Gracias por su compra!');
     return lineas.join('\n');
   }
+  function nombreMedio(m){ return m==='transferencia' ? 'Transferencia' : (m==='efectivo' ? 'Efectivo' : ''); }
   function urlWhatsapp(telefono, texto){
     var tel = (telefono||'').replace(/[^0-9]/g,'');
     return 'https://wa.me/' + (tel?('57'+tel.replace(/^57/,'')): '') + '?text=' + encodeURIComponent(texto);
@@ -1649,14 +1664,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   async function paqueteVentasMes(ym){
     var ventas = state.ventas.filter(function(v){ return mesDe(fechaLocalISO(v.fecha))===ym; }).sort(function(a,b){ return (a.numero||0)-(b.numero||0); });
     var archivos = [];
-    var filas = [['Cuenta de cobro N.°','Fecha','Cliente','NIT/CC','Teléfono','Ruta','Vendedor','Forma de pago','Total','Abono','Saldo','Comentarios']];
+    var filas = [['Cuenta de cobro N.°','Fecha','Cliente','NIT/CC','Teléfono','Ruta','Vendedor','Forma de pago','Medio de pago','Total','Abono','Saldo','Comentarios']];
     for(var i = 0; i < ventas.length; i++){
       var v = ventas[i];
       var cli = clienteById(v.clienteId) || {nombre:v.clienteNombre, telefono:v.clienteTelefono};
       var blob = await generarFacturaPDF(datosPdf(v, cli));
       archivos.push({ nombre:'Cuenta-de-cobro-'+v.numero+'.pdf', bytes:new Uint8Array(await blob.arrayBuffer()) });
       filas.push([v.numero, fechaLocalISO(v.fecha), v.clienteNombre||'', cli.documento||'', v.clienteTelefono||'', v.rutaNombre||'', v.vendedorNombre||'',
-        v.tipoPago==='credito'?'Crédito':'Contado', v.total||0, v.abono||0, v.saldo||0, v.comentarios||'']);
+        v.tipoPago==='credito'?'Crédito':'Contado', nombreMedio(v.medioPago), v.total||0, v.abono||0, v.saldo||0, v.comentarios||'']);
     }
     archivos.push({ nombre:'Resumen-ventas-'+ym+'.csv', bytes:csvBytes(filas) });
     return { file:new File([crearZip(archivos)], 'CasaLED-ventas-'+ym+'.zip', {type:'application/zip'}), cantidad:ventas.length };
@@ -1716,7 +1731,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   function reenviarFactura(venta){
     var cliente = clienteById(venta.clienteId) || {nombre:venta.clienteNombre, telefono:venta.clienteTelefono, direccion:''};
     var cfg = state.config || {empresaNombre:'Casa LED'};
-    var pago = {tipo:venta.tipoPago||'contado', abono:venta.abono};
+    var pago = {tipo:venta.tipoPago||'contado', abono:venta.abono, medio:venta.medioPago};
     enviarFacturaWhatsapp(venta.numero, cliente, venta.items, venta.total, cfg, pago);
   }
 
@@ -2148,22 +2163,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '</div>'+
       '</div></div>';
     }).join('') : '<div class="empty" style="padding:16px;">Todavía no hay facturas de compra.</div>';
-    // Tope para seguir como no responsable de IVA: 3.500 UVT de ingresos brutos en el año
-    var UVT = {2026:52374};
-    var anio = new Date().getFullYear();
-    var uvtAnio = UVT[anio] || UVT[Math.max.apply(null, Object.keys(UVT).map(Number))];
-    var tope = 3500 * uvtAnio;
-    var vendidoAnio = state.ventas.filter(function(v){ return fechaLocalISO(v.fecha).slice(0,4)===String(anio); }).reduce(function(s2,v){ return s2+(Number(v.total)||0); },0);
-    var pct = Math.min(100, Math.round(vendidoAnio / tope * 100));
-    var colorTope = pct >= 85 ? 'var(--red)' : (pct >= 65 ? 'var(--amber)' : 'var(--green)');
-    var topeHtml = '<div class="card" style="margin-bottom:12px;">'+
-      '<div class="small" style="font-weight:700;margin-bottom:6px;">Tope para seguir como no responsable de IVA · '+anio+'</div>'+
-      '<div class="row between small"><span>Ventas en la app: <strong>'+fmtCOP(vendidoAnio)+'</strong></span><span class="muted">de '+fmtCOP(tope)+'</span></div>'+
-      '<div style="height:8px;background:var(--panel-2);border-radius:99px;margin:8px 0;overflow:hidden;"><div style="height:100%;width:'+pct+'%;background:'+colorTope+';"></div></div>'+
-      '<div class="small muted">3.500 UVT ('+fmtCOP(uvtAnio)+' c/u). Suma también lo que vendas por fuera de la app. Si tus ventas del año o lo que te consignen en el banco pasan este tope, debes inscribirte como responsable de IVA y facturar electrónicamente. Si pasas el 85 %, habla con tu contador.</div>'+
-    '</div>';
     return '<h2 class="section-title" style="margin-top:26px;">Contabilidad</h2>'+
-      topeHtml+
       '<div class="card">'+
         '<div class="field"><label>Mes</label><select id="conta-mes">'+lista.map(function(m){ return '<option value="'+m+'"'+(m===ym?' selected':'')+'>'+esc(nombreMes(m))+'</option>'; }).join('')+'</select></div>'+
         '<button class="btn btn-primary btn-block" data-action="exportar-ventas" '+(nV?'':'disabled')+'>📄 Cuentas de cobro (ventas) del mes ('+nV+') · PDF + Excel</button>'+
@@ -2393,7 +2393,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<h2 class="section-title">Salidas a ruta</h2><div class="card">'+jornadasHtml+'</div>'+
       '<h2 class="section-title">Deudores</h2><div class="card">'+deudoresHtml+'</div>'+
       '<h2 class="section-title">Gastos'+(gastosRuta.length?(' · <span class="mono">'+fmtCOP(totalGastosF)+'</span>'):'')+'</h2><div class="card">'+gastosHistHtml+'</div>'+
-      '<h2 class="section-title">Facturas</h2><div class="card">'+facturasHtml+'</div>'+
+      '<div class="row between" style="margin:18px 0 10px;"><h2 class="section-title" style="margin:0;">Facturas</h2>'+
+        '<button class="btn btn-sm btn-ghost" data-action="abrir-soporte-dian">📑 Generar soporte DIAN</button></div>'+
+      '<div class="card">'+facturasHtml+'</div>'+
       '<div class="divider" style="margin:22px 0 4px;"></div>'+
       '<button class="card row between" style="width:100%;margin-top:14px;text-align:left;color:var(--text);" data-action="toggle-movimientos">'+
         '<span class="product-name">Movimientos de inventario</span>'+
@@ -2424,6 +2426,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
             '<div class="field"><label>Notas al pie de la cuenta de cobro</label><textarea id="cfg-notas" rows="3" '+dis+'>'+esc(e.notasFactura)+'</textarea></div>';
         })()+
         '<button class="btn btn-primary btn-block" data-action="guardar-empresa">Guardar</button>'+
+      '</div>'+
+      '<h2 class="section-title">RUT</h2>'+
+      '<div class="card">'+
+        (function(){
+          var rr = state.config && state.config.rut;
+          if(!rr) return '<div class="small muted" style="margin-bottom:10px;">Sube el PDF de tu RUT. La app lo lee aquí mismo y llena tus datos (nombre, NIT, dirección, ciudad) en la cuenta de cobro y en el soporte DIAN.</div>';
+          return '<div class="small" style="line-height:1.6;margin-bottom:10px;">'+
+            '<strong>'+esc([rr.primerNombre, rr.otrosNombres, rr.primerApellido, rr.segundoApellido].filter(Boolean).join(' '))+'</strong><br>'+
+            'NIT '+esc(rr.numero)+'-'+esc(rr.dv)+' · '+esc((rr.responsabilidades||[]).join(' · '))+'<br>'+
+            esc(rr.direccion)+' · '+esc(rr.municipio)+', '+esc(rr.departamento)+'<br>'+
+            '<span class="muted">CIIU '+esc(rr.ciiu)+(rr.matricula?(' · Matrícula '+esc(rr.matricula)):'')+' · leído el '+esc(fmtFecha(rr.leidoEn))+'</span></div>';
+        })()+
+        (state.isAdmin ? '<button class="btn btn-ghost btn-block" data-action="leer-rut">📄 '+((state.config && state.config.rut)?'Actualizar RUT (PDF)':'Subir RUT (PDF)')+'</button>'+
+          '<input id="rut-input" type="file" accept="application/pdf" style="display:none;">' : '')+
       '</div>';
   }
 
@@ -2446,7 +2462,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var totalRF = itemsRF.reduce(function(s,it){return s+it.subtotal;},0);
       var clienteRF = clienteCheckout();
       var cfgRF = cfgEmpresa();
-      var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF, comentarios:(state.checkoutComentarios||'').trim()};
+      var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF, medio: state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim()};
       var saldoRF = Math.max(0, totalRF - (pagoRF.abono||0));
       var previewTexto = textoFactura('(sin asignar)', clienteRF, itemsRF, totalRF, cfgRF, pagoRF);
       var nc = state.modal.nc || {};
@@ -2491,6 +2507,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="field"><label>Abono (pago inicial)</label><input id="rf-abono" type="number" min="0" max="'+totalRF+'" value="'+(state.checkoutAbono||0)+'" data-total="'+totalRF+'"></div>'+
           '<div class="small muted" style="margin-bottom:10px;">Saldo pendiente: <strong id="rf-saldo">'+fmtCOP(saldoRF)+'</strong></div>'
           : '<div class="small muted" style="margin-bottom:10px;">Se registra como pagada de contado.</div>')+
+        '<label>'+(state.checkoutPago==='credito' ? 'Medio de pago del abono' : 'Medio de pago')+'</label>'+
+        '<div class="chips" style="margin-bottom:10px;">'+
+          '<button class="chip'+(state.checkoutMedio!=='transferencia'?' active':'')+'" data-action="set-medio-pago" data-medio="efectivo">💵 Efectivo</button>'+
+          '<button class="chip'+(state.checkoutMedio==='transferencia'?' active':'')+'" data-action="set-medio-pago" data-medio="transferencia">📲 Transferencia</button>'+
+        '</div>'+
         '<div class="field"><label>Comentarios (opcional, salen en la factura)</label>'+
           '<textarea id="rf-comentarios" rows="3" placeholder="Ej: se entrega el viernes, cambio pendiente de 2 direccionales…">'+esc(state.checkoutComentarios||'')+'</textarea></div>'+
         '<label>Así se verá la factura</label>'+
@@ -2525,6 +2546,30 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='soporte-dian'){
+      var sd = state.modal; var rutSD = state.config && state.config.rut;
+      var ventasSD = state.ventas.slice().sort(function(a,b){ return (b.numero||0)-(a.numero||0); }).slice(0, 300);
+      html = '<h3>Generar soporte DIAN</h3>'+
+        '<div class="small muted" style="margin-bottom:12px;">Elige la cuenta de cobro. Se crea un PDF con tus datos del RUT y los de la venta, listo para que la empresa haga su documento soporte ante la DIAN.</div>'+
+        (!rutSD ? '<div class="small" style="background:rgba(245,158,11,.12);border:1px solid var(--amber);border-radius:10px;padding:10px;margin-bottom:12px;">Primero hay que subir el RUT en Historial → RUT'+(state.isAdmin?'':' (lo hace el administrador)')+'.</div>' : '')+
+        '<div class="field"><label>Cuenta de cobro</label><select id="sd-venta">'+
+          '<option value="">— Elige —</option>'+
+          ventasSD.map(function(v){ return '<option value="'+v.id+'"'+(sd.ventaId===v.id?' selected':'')+'>N.° '+v.numero+' · '+esc(v.clienteNombre||'')+' · '+fmtCOP(v.total)+' · '+esc(fechaLocalISO(v.fecha))+'</option>'; }).join('')+
+        '</select></div>'+
+        (function(){
+          var v = sd.ventaId ? state.ventas.find(function(x){ return x.id===sd.ventaId; }) : null;
+          if(!v) return '';
+          var c = clienteById(v.clienteId) || {};
+          var faltan = [];
+          if(!c.documento) faltan.push('NIT');
+          if(!c.direccion) faltan.push('dirección');
+          if(!v.medioPago && (Number(v.abono)||0) > 0) faltan.push('medio de pago (la venta es de antes de este cambio)');
+          return faltan.length ? '<div class="small" style="color:var(--amber);margin-bottom:10px;">Al cliente le falta: '+faltan.join(', ')+'. Puedes completarlo en Clientes o editando la factura; si no, sale en blanco.</div>' : '';
+        })()+
+        '<div class="row" style="margin-top:10px;">'+
+          '<button class="btn btn-primary" style="flex:1;padding:13px;" data-action="generar-soporte-dian" '+(rutSD && sd.ventaId ? '' : 'disabled')+'>Generar PDF</button>'+
+          '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
+        '</div>';
     } else if(state.modal.type==='pegar-compra'){
       var pm = state.modal;
       html = '<h3>Agregar factura de compra</h3>'+
@@ -2626,6 +2671,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           filaB('Ventas a crédito', fmtCOP(rm.credito))+
           filaB('Abonos recibidos', fmtCOP(rm.abonos))+
           filaB('Dinero recibido', fmtCOP(rm.recibido), null, true)+
+          (rm.efectivo!=null ?
+            filaB('💵 En efectivo'+(rm.sinMedio?' <span class="muted">(incluye '+fmtCOP(rm.sinMedio)+' sin medio registrado)</span>':''), fmtCOP((rm.efectivo||0)+(rm.sinMedio||0)))+
+            filaB('📲 Por transferencia', fmtCOP(rm.transferencia||0)) : '')+
           filaB('Gastos de ruta', '− '+fmtCOP(rm.totalGastos), 'var(--red)')+
           filaB('Efectivo a entregar', fmtCOP(rm.efectivoNeto), 'var(--green)', true)+
         '</div>'+
@@ -2855,6 +2903,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       prepararArchivo('Facturas de compra · '+nombreMes(ymC), paqueteComprasMes(ymC));
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
+    else if(action==='abrir-soporte-dian'){ state.modal = {type:'soporte-dian'}; render(); }
+    else if(action==='generar-soporte-dian'){
+      var vSD = state.ventas.find(function(x){ return x.id===state.modal.ventaId; });
+      var rutG = state.config && state.config.rut;
+      if(!vSD || !rutG) return;
+      var cSD = clienteById(vSD.clienteId) || {nombre:vSD.clienteNombre, telefono:vSD.clienteTelefono};
+      var eSD = cfgEmpresa();
+      prepararArchivo('Soporte DIAN · cuenta de cobro N.° '+vSD.numero, generarSoporteDIAN({
+        rut: rutG, empresa:{ nombre:eSD.empresaNombre, telefono:eSD.empresaTelefono }, venta: vSD,
+        cliente: { nombre:cSD.nombre||'', documento:cSD.documento||'', direccion:cSD.direccion||'', ciudad:cSD.ciudad||'', telefono:cSD.telefono||'' },
+        items: vSD.items||[]
+      }).then(function(blob){ return { file: new File([blob], 'Soporte-DIAN-cuenta-de-cobro-'+vSD.numero+'.pdf', {type:'application/pdf'}) }; }));
+    }
+    else if(action==='leer-rut'){ var ir = document.getElementById('rut-input'); if(ir) ir.click(); }
     else if(action==='agregar-factura-compra'){ state.modal = {type:'pegar-compra'}; render(); }
     else if(action==='pegar-compra-portapapeles'){ await pegarDesdePortapapeles(); }
     else if(action==='elegir-archivo-compra'){ var inpP = document.getElementById('compra-pegar-input'); if(inpP) inpP.click(); }
@@ -2975,6 +3037,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.checkoutPago = ve.tipoPago || 'contado';
       state.checkoutAbono = ve.tipoPago==='credito' ? (Number(ve.abono)||0) : 0;
       state.checkoutComentarios = ve.comentarios || '';
+      state.checkoutMedio = ve.medioPago || 'efectivo';
       state.modal = null; state.activeTab = 'vender';
       render(); window.scrollTo(0,0);
       toast('Editando factura #'+ve.numero);
@@ -3009,6 +3072,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var vf = state.ventas.find(function(v){ return v.id===id; });
       if(vf) abrirFactura(vf, null, false);
     }
+    else if(action==='set-medio-pago'){ state.checkoutMedio = t.getAttribute('data-medio'); render({preservar:true}); }
     else if(action==='set-tipo-pago'){
       state.checkoutPago = t.getAttribute('data-tipo');
       if(state.checkoutPago!=='credito') state.checkoutAbono = 0;
@@ -3198,7 +3262,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var clienteRF = clienteCheckout();
       var cfgRF = cfgEmpresa();
       var previewEl = document.getElementById('rf-preview');
-      if(previewEl) previewEl.textContent = textoFactura('(sin asignar)', clienteRF, itemsRF, total, cfgRF, {tipo:'credito', abono:abono});
+      if(previewEl) previewEl.textContent = textoFactura('(sin asignar)', clienteRF, itemsRF, total, cfgRF, {tipo:'credito', abono:abono, medio:state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim()});
     }
   });
 
@@ -3220,6 +3284,26 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(!!dupN !== !!state.modal.duplicada){ state.modal.duplicada = dupN; if(dupN) state.modal.sumarStock = false; render({preservar:true}); }
         return;
       }
+    }
+    if(e.target.id==='sd-venta' && state.modal && state.modal.type==='soporte-dian'){ state.modal.ventaId = e.target.value; render(); return; }
+    if(e.target.id==='rut-input'){
+      var fr = e.target.files && e.target.files[0]; e.target.value = '';
+      if(!fr || !state.isAdmin) return;
+      toast('Leyendo el RUT…');
+      try{
+        var rut = leerRUT(await leerPDF(await fr.arrayBuffer()));
+        if(!rut.valido){ toast('No pude leer ese PDF como RUT. Usa el PDF que descargas de la DIAN.'); return; }
+        var nombreR = [rut.primerNombre, rut.otrosNombres, rut.primerApellido, rut.segundoApellido].filter(Boolean).join(' ');
+        var tituloR = nombreR.toLowerCase().replace(/(^|\s)([a-záéíóúñ])/g, function(x, a, c){ return a + c.toUpperCase(); });
+        var nitR = rut.numero.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + '-' + rut.dv;
+        var dirR = rut.direccion;
+        var ciudadR = [rut.municipio, rut.departamento].filter(Boolean).map(function(x){ return x.charAt(0).toUpperCase()+x.slice(1).toLowerCase(); }).join(', ');
+        if(!confirm('RUT leído:\n\n'+nombreR+'\nNIT '+nitR+'\n'+dirR+'\n'+ciudadR+'\n'+(rut.responsabilidades||[]).join(', ')+'\n\nSe actualizan titular, NIT, dirección y ciudad de la cuenta de cobro. ¿Guardar?')) return;
+        rut.leidoEn = todayISO();
+        await db.doc('config/general').set({ rut:rut, empresaTitular:tituloR, empresaNit:nitR, empresaDireccion:dirR, empresaCiudad:ciudadR }, {merge:true});
+        toast('RUT guardado');
+      }catch(errR){ console.error(errR); toast('No pude leer ese PDF. Intenta de nuevo.'); }
+      return;
     }
     if(e.target.id==='compra-pegar-input'){
       var fp = e.target.files && e.target.files[0]; e.target.value = '';

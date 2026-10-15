@@ -326,7 +326,7 @@ export async function generarFacturaPDF(datos){
   pdf.stroke(LINEA); pdf.line(xT, yT, xT + wT, yT);
   filaTot('TOTAL', cop(v.total), yT + 2, { fondo: NEGRO, color: BLANCO, size: 12, h: 28 }); yT += 32;
   if(credito){
-    filaTot('ABONO', cop(v.abono), yT); yT += 20;
+    filaTot('ABONO' + ((Number(v.abono) || 0) > 0 && v.medioPago ? ' · ' + (v.medioPago === 'transferencia' ? 'TRANSF.' : 'EFECTIVO') : ''), cop(v.abono), yT); yT += 20;
     filaTot('SALDO PENDIENTE', cop(v.saldo), yT, { fondo: [253, 236, 236], color: ROJO, h: 24 }); yT += 26;
   }
 
@@ -334,7 +334,8 @@ export async function generarFacturaPDF(datos){
   const wL = ANCHO - wT - 14;
   pdf.stroke(LINEA); pdf.lineWidth(0.8); pdf.rect(M, y, wL, yT - y, 'S');
   pdf.text('FORMA DE PAGO', M + 10, y + 16, { size: 8, bold: true, color: GRIS });
-  pdf.text(credito ? 'CRÉDITO' : 'CONTADO · PAGADO', M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
+  const medioTxt = v.medioPago === 'transferencia' ? 'TRANSFERENCIA' : (v.medioPago === 'efectivo' ? 'EFECTIVO' : '');
+  pdf.text(credito ? 'CRÉDITO' : ('CONTADO' + (medioTxt ? ' · ' + medioTxt : ' · PAGADO')), M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
   pdf.text(items.length + ' referencia(s) · ' + unidades + ' unidad(es)', M + 10, y + 50, { size: 9, color: GRIS });
 
   let yN = Math.max(yT, y + 60) + 10;
@@ -370,5 +371,161 @@ export async function generarFacturaPDF(datos){
   if(yN + 6 <= LIMITE) pdf.text('¡Gracias por su compra!', PAGE_W / 2, yN + 6, { size: 11, bold: true, color: AZUL, align: 'center' });
   pie();
 
+  return pdf.salida();
+}
+
+// ---------- Datos para el documento soporte (lo genera el comprador ante la DIAN) ----------
+// datos: { rut:{...leerRUT}, empresa:{nombre, telefono}, venta, cliente, items }
+export async function generarSoporteDIAN(datos){
+  const r = datos.rut || {}, e = datos.empresa || {}, v = datos.venta || {}, cl = datos.cliente || {};
+  const items = datos.items || [];
+  const pdf = new MiniPDF();
+  const M = 36, ANCHO = PAGE_W - 2 * M;
+  let pagina = 1;
+  const pie = () => {
+    pdf.stroke(LINEA); pdf.lineWidth(0.6); pdf.line(M, PAGE_H - 30, PAGE_W - M, PAGE_H - 30);
+    pdf.text('Información preparada por el proveedor para facilitar el documento soporte. Este documento no reemplaza el documento soporte electrónico.', M, PAGE_H - 18, { size: 7, color: GRIS });
+    pdf.text('Página ' + pagina, PAGE_W - M, PAGE_H - 18, { size: 7, color: GRIS, align: 'right' });
+  };
+  const nuevaPagina = () => { pie(); pdf.addPage(); pagina++; return 40; };
+  const LIM = PAGE_H - 44;
+
+  // Encabezado
+  pdf.fill(NEGRO); pdf.rect(0, 0, PAGE_W, 8, 'f');
+  pdf.fill(AZUL); pdf.rect(0, 8, PAGE_W, 2.5, 'f');
+  pdf.text('DATOS PARA EL DOCUMENTO SOPORTE', M, 40, { size: 16, bold: true, color: NEGRO });
+  pdf.text('En adquisiciones efectuadas a sujetos no obligados a expedir factura de venta o documento equivalente', M, 55, { size: 9, color: AZUL, bold: true });
+  pdf.text('Art. 1.6.1.4.12 del Decreto 1625 de 2016 · Resolución DIAN 000167 de 2021', M, 67, { size: 8.5, color: GRIS });
+  let y = 84;
+
+  const titulo = (t) => {
+    if(y + 40 > LIM) y = nuevaPagina();
+    pdf.fill(NEGRO); pdf.rect(M, y, ANCHO, 18, 'f');
+    pdf.text(t, M + 8, y + 12.5, { size: 9, bold: true, color: BLANCO });
+    y += 18;
+  };
+  // tabla de 2 columnas de pares etiqueta/valor
+  const pares = (lista) => {
+    const colW = ANCHO / 2, etqW = 112;
+    for(let i = 0; i < lista.length; i += 2){
+      const filaPar = [lista[i], lista[i + 1]].filter(Boolean);
+      const alturas = filaPar.map((p) => pdf.envolver(String(p[1] == null || p[1] === '' ? '—' : p[1]), colW - etqW - 12, 9, true).length);
+      const h = Math.max(18, 7 + Math.max.apply(null, alturas) * 11);
+      if(y + h > LIM) y = nuevaPagina();
+      pdf.fill((i / 2) % 2 ? BLANCO : ZEBRA); pdf.rect(M, y, ANCHO, h, 'f');
+      filaPar.forEach((p, k) => {
+        const x = M + k * colW;
+        pdf.text(p[0], x + 8, y + 12, { size: 7.5, bold: true, color: GRIS });
+        pdf.envolver(String(p[1] == null || p[1] === '' ? '—' : p[1]), colW - etqW - 12, 9, true).forEach((l, j) => pdf.text(l, x + etqW, y + 12 + j * 11, { size: 9, bold: true, color: NEGRO }));
+      });
+      pdf.stroke(LINEA); pdf.lineWidth(0.5); pdf.line(M, y + h, M + ANCHO, y + h);
+      y += h;
+    }
+    y += 10;
+  };
+
+  const credito = v.tipoPago === 'credito';
+  const medio = v.medioPago === 'transferencia' ? 'Transferencia' : (v.medioPago === 'efectivo' ? 'Efectivo' : '');
+  const fecha = new Date(v.fecha || Date.now());
+  const fechaTxt = fecha.toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const horaTxt = fecha.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+
+  titulo('1. OPERACIÓN');
+  pares([
+    ['Documento del proveedor', 'Cuenta de cobro N.° ' + (v.numero || '')],
+    ['Fecha de la operación', fechaTxt + ' · ' + horaTxt],
+    ['Lugar', [r.municipio, r.departamento].filter(Boolean).join(', ')],
+    ['Moneda', 'COP – Peso colombiano']
+  ]);
+
+  titulo('2. PROVEEDOR (vendedor no obligado a facturar)');
+  const nombreCompleto = [r.primerNombre, r.otrosNombres, r.primerApellido, r.segundoApellido].filter(Boolean).join(' ');
+  pares([
+    ['Tipo de persona', 'Persona natural (código 2)'],
+    ['Tipo de documento', (r.tipoDocumento || 'Cédula de ciudadanía') + ' (código 13)'],
+    ['Número de identificación', r.numero],
+    ['Dígito de verificación', r.dv],
+    ['Primer apellido', r.primerApellido],
+    ['Segundo apellido', r.segundoApellido],
+    ['Primer nombre', r.primerNombre],
+    ['Otros nombres', r.otrosNombres],
+    ['Nombre completo', nombreCompleto],
+    ['Nombre comercial', e.nombre],
+    ['Dirección (RUT)', r.direccion],
+    ['Municipio', (r.municipio || '') + (r.codMunicipio ? ' (DANE ' + r.codMunicipio + ')' : '')],
+    ['Departamento', (r.departamento || '') + (r.codDepartamento ? ' (código ' + r.codDepartamento + ')' : '')],
+    ['País', 'Colombia (CO)'],
+    ['Teléfono', r.telefono || e.telefono],
+    ['Correo electrónico', r.correo],
+    ['Responsabilidad en el RUT', (r.responsabilidades || []).join(' · ') || '49 - No responsable de IVA'],
+    ['Actividad económica (CIIU)', r.ciiu],
+    ['Tributo', 'ZZ – No aplica (no responsable de IVA)'],
+    ['Matrícula mercantil', r.matricula]
+  ]);
+
+  titulo('3. COMPRADOR (quien genera el documento soporte)');
+  pares([
+    ['Nombre o razón social', cl.nombre],
+    ['NIT / CC', cl.documento],
+    ['Dirección', cl.direccion],
+    ['Ciudad', cl.ciudad],
+    ['Teléfono', cl.telefono]
+  ]);
+
+  titulo('4. DETALLE DE LOS BIENES');
+  const C = [
+    { t: '#', w: 22, a: 'center' }, { t: 'DESCRIPCIÓN', w: 0, a: 'left' }, { t: 'UNIDAD', w: 64, a: 'center' },
+    { t: 'CANT.', w: 44, a: 'center' }, { t: 'VALOR UNIT.', w: 78, a: 'right' }, { t: 'IVA', w: 40, a: 'center' }, { t: 'VALOR TOTAL', w: 84, a: 'right' }
+  ];
+  C[1].w = ANCHO - C.reduce((s, c) => s + c.w, 0);
+  let xC = M; C.forEach((c) => { c.x = xC; xC += c.w; });
+  const cabTabla = () => {
+    pdf.fill(AZUL_CLARO); pdf.rect(M, y, ANCHO, 16, 'f');
+    C.forEach((c) => pdf.text(c.t, c.a === 'right' ? c.x + c.w - 6 : (c.a === 'center' ? c.x + c.w / 2 : c.x + 6), y + 11, { size: 7.5, bold: true, color: GRIS, align: c.a }));
+    y += 16;
+  };
+  cabTabla();
+  items.forEach((it, i) => {
+    const lineas = pdf.envolver(it.nombre || '', C[1].w - 12, 9, false, 3);
+    const h = Math.max(18, 7 + lineas.length * 11);
+    if(y + h > LIM){ y = nuevaPagina(); cabTabla(); }
+    const yc = y + 12;
+    pdf.text(String(i + 1), C[0].x + C[0].w / 2, yc, { size: 9, align: 'center', color: GRIS });
+    lineas.forEach((l, k) => pdf.text(l, C[1].x + 6, yc + k * 11, { size: 9 }));
+    pdf.text('94 – Unidad', C[2].x + C[2].w / 2, yc, { size: 8, align: 'center', color: GRIS });
+    pdf.text(String(it.cantidad), C[3].x + C[3].w / 2, yc, { size: 9, bold: true, align: 'center' });
+    pdf.text(cop(it.precio), C[4].x + C[4].w - 6, yc, { size: 9, align: 'right' });
+    pdf.text('0 %', C[5].x + C[5].w / 2, yc, { size: 8, align: 'center', color: GRIS });
+    pdf.text(cop(it.subtotal), C[6].x + C[6].w - 6, yc, { size: 9, bold: true, align: 'right' });
+    pdf.stroke(LINEA); pdf.lineWidth(0.5); pdf.line(M, y + h, M + ANCHO, y + h);
+    y += h;
+  });
+  y += 10;
+
+  titulo('5. TOTALES Y PAGO');
+  pares([
+    ['Valor bruto', cop(v.total)],
+    ['IVA', '$0 – No aplica'],
+    ['Descuentos', '$0'],
+    ['Valor total', cop(v.total)],
+    ['Forma de pago', credito ? 'Crédito (código 2)' : 'Contado (código 1)'],
+    ['Medio de pago', medio || 'No registrado'],
+  ].concat(credito ? [['Abono recibido', cop(v.abono)], ['Saldo pendiente', cop(v.saldo)]] : []));
+
+  titulo('6. NOTAS');
+  const notas = [
+    'El proveedor es persona natural no responsable del IVA (responsabilidad 49 en el RUT) y no está obligado a expedir factura de venta (art. 1.6.1.4.3 del Decreto 1625 de 2016). Por eso no cobra IVA.',
+    'El documento soporte electrónico lo debe generar y transmitir a la DIAN el comprador, con su propia numeración autorizada (art. 1.6.1.4.12 del Decreto 1625 de 2016 y Resolución DIAN 000167 de 2021).',
+    'Las retenciones que correspondan (renta, ICA) las calcula y practica el comprador, si es agente de retención.',
+    'Esta información corresponde a la cuenta de cobro N.° ' + (v.numero || '') + ' entregada al comprador.'
+  ];
+  notas.forEach((n) => {
+    const ls = pdf.envolver(n, ANCHO - 20, 8.5, false);
+    if(y + ls.length * 11 + 4 > LIM) y = nuevaPagina();
+    pdf.text('•', M + 4, y + 9, { size: 8.5, color: AZUL, bold: true });
+    ls.forEach((l, k) => pdf.text(l, M + 14, y + 9 + k * 11, { size: 8.5, color: NEGRO }));
+    y += ls.length * 11 + 4;
+  });
+  pie();
   return pdf.salida();
 }

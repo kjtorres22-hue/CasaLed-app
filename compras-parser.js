@@ -204,3 +204,60 @@ export function parsearFactura(paginas){
   r.suma = lineas.reduce(function(s, l){ return s + (l.repetida ? 0 : l.subtotal); }, 0);
   return r;
 }
+
+// ---------- RUT (formulario 001 de la DIAN) ----------
+function dvNit(nit){
+  var w = [3,7,13,17,19,23,29,37,41,43,47,53,59,67,71];
+  var s = String(nit).replace(/\D/g, '').split('').reverse().reduce(function(a, d, i){ return a + Number(d) * w[i]; }, 0);
+  var r = s % 11; return String(r > 1 ? 11 - r : r);
+}
+export { dvNit };
+export function leerRUT(paginas){
+  var filas = [];
+  paginas.forEach(function(p){ p.forEach(function(f){ filas.push(f); }); });
+  var idx = function(re){ for(var i = 0; i < filas.length; i++){ if(filas[i].some(function(c){ return re.test(c); })) return i; } return -1; };
+  var despues = function(re){ var i = idx(re); return i > -1 && filas[i+1] ? filas[i+1] : []; };
+  var enFila = function(re){ var i = idx(re); if(i < 0) return ''; var f = filas[i]; var k = f.findIndex(function(c){ return re.test(c); }); return f.slice(k+1).join(' ').trim(); };
+  var r = {};
+  // nombres
+  var nom = despues(/31\.\s*Primer apellido/i);
+  r.primerApellido = nom[0] || ''; r.segundoApellido = nom[1] || ''; r.primerNombre = nom[2] || ''; r.otrosNombres = nom.slice(3).join(' ');
+  r.razonSocial = enFila(/35\.\s*Raz[oó]n social/i);
+  // identificación
+  var ident = despues(/24\.\s*Tipo de contribuyente/i);
+  var celdaNum = ident.find(function(c){ return /^(\d\s){5,}\d$/.test(c); }) || '';
+  r.numero = celdaNum.replace(/\s/g, '');
+  r.tipoContribuyente = ident[0] || '';
+  r.tipoDocumento = ident.find(function(c){ return /c[eé]dula|nit|pasaporte|extranjer/i.test(c); }) || '';
+  if(!r.numero){
+    var filaNit = despues(/5\.\s*N[uú]mero de Identificaci[oó]n Tributaria/i).join('');
+    r.numero = filaNit.slice(0, 10);
+  }
+  var filaNit2 = despues(/5\.\s*N[uú]mero de Identificaci[oó]n Tributaria/i).join('');
+  var dvLeido = filaNit2.indexOf(r.numero) === 0 ? filaNit2.charAt(r.numero.length) : '';
+  r.dv = dvNit(r.numero);
+  r.dvCoincide = !dvLeido || dvLeido === r.dv;
+  // ubicación
+  var ubic = despues(/38\.\s*Pa[ií]s/i);
+  var nombres = ubic.filter(function(c){ return /[a-záéíóúñ]/i.test(c) && !/^colombia$/i.test(c); });
+  r.departamento = nombres[0] || ''; r.municipio = nombres[1] || '';
+  var codigos = [], actual = '';
+  ubic.forEach(function(c){ if(/^\d$/.test(c)) actual += c; else { if(actual) codigos.push(actual); actual = ''; } });
+  if(actual) codigos.push(actual);
+  // codigos: [país, depto, municipio]
+  r.codDepartamento = codigos[1] || ''; r.codMunicipio = (codigos[1] || '') + (codigos[2] || '');
+  r.pais = 'Colombia';
+  r.direccion = despues(/41\.\s*Direcci[oó]n principal/i).join(' ').trim();
+  r.correo = enFila(/42\.\s*Correo/i).toLowerCase();
+  var tel = enFila(/44\.\s*Tel[eé]fono 1/i).replace(/45\..*$/, '');
+  r.telefono = tel.replace(/\D/g, '');
+  // actividad económica (CIIU principal)
+  var act = despues(/46\.\s*C[oó]digo/i).join('');
+  r.ciiu = act.slice(0, 4);
+  // responsabilidades
+  r.responsabilidades = filas.map(function(f){ return f.join(' '); }).filter(function(t){ return /^\d{1,2}\s*-\s*\S/.test(t); });
+  var mat = enFila(/77\.\s*No\.\s*Matr[ií]cula/i).replace(/\D/g, '');
+  r.matricula = mat;
+  r.valido = !!(r.numero && r.primerApellido && r.direccion);
+  return r;
+}
