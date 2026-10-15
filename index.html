@@ -272,7 +272,7 @@
 </div>
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
-import { generarFacturaPDF, generarSoporteDIAN, TITULO_DOC } from './factura-pdf.js';
+import { generarFacturaPDF, generarSoporteDIAN, generarPedidoPDF, TITULO_DOC } from './factura-pdf.js';
 import { leerPDF, textoAPaginas, parsearFactura, leerRUT } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
@@ -330,7 +330,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -1460,6 +1460,35 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     'SW-MTL':'interruptor-4funciones', 'SWLED*':'interruptor-led-2funciones', 'SW-ESP':'interruptor-3funciones-espejo',
     'NK218':'interruptor-3funciones-manillar', 'DD-R59':'stop-lujo-ns200-rgb'
   };
+  // Códigos de proveedor vistos en la factura Moto Fox 39072 (producto|color → código).
+  var CODIGOS_VISTOS = {
+    'motoled-6000lm':'M4PLUSCOB', 'motoled-8000lm':'M4PLUSCSP', 'ceramico-h4-triceta':'H4-4MTCOBAC',
+    'direccional-flash-naranja':'1159-06-FL', 'direccional-flash-blanco':'1159-00-FL', 'motoled-10000lm':'M2PRO-H4',
+    'motoled-16000lm':'M4PROH4', 'mi45-10000lm-par':'MI45H4', 'ceramico-ba20d':'BA20DM4TCCOBAC', 'stop-flash':'115904',
+    't10-fijo-unicolor|Blanco':'T10-FIJO-00', 't10-fijo-unicolor|Verde':'T10-FIJO-07',
+    't10-flash-unicolor|Morado':'T10-FLASH-08', 't10-flash-unicolor|Rojo':'T10-FLASH-04',
+    'ceramico-p15-6-10w':'P15D-3MTC-COB-AC', 'cargador-usb-doble':'3021', 'correa-bws':'5S9-17641-09', 'correa-agility':'23100-KEC4-COE',
+    't10-rgb-multifuncion':'T10-RGB', 'direccional-diamante-cristal':'ZXD-112', 'direccional-tipo-hoja':'ZXD-14',
+    'direccional-flecha-mini':'ZXD-09MINI', 'direccional-lineal-fija':'ZXD-20-Y', 'direccional-lineal-secuencial':'ZXD-04-Y',
+    'direccional-ojo-aguila':'LT001', 'direccional-tipo-bala':'ZXD-58-Y', 'exploradora-lupa-federal':'FX-3M-SYC-4LED',
+    'exploradora-foco-lupa-mini':'JRY-10-MINI', 'exploradora-lineal-federal':'XK-D3M-6LED', 'exploradora-minidriving':'TD35-MINI-1V1',
+    'exploradora-minieco':'TD35-MINI-B', 'exploradora-buho-par':'MTY20W1V1', 'exploradora-wall-e-par':'JM-50W',
+    'modulos-led-unicolor|Azul':'MODULED-05', 'modulos-led-unicolor|Rojo':'MODULED-04', 'modulos-led-unicolor|Verde':'MODULED-07',
+    'interruptor-2funciones-pack':'NK251', 'interruptor-3funciones-manillar-pack':'SW-3G', 'interruptor-4funciones':'SW-MTL',
+    'interruptor-3funciones-espejo':'SW-ESP', 'interruptor-3funciones-manillar':'NK218', 'stop-lujo-ns200-rgb':'DD-R59'
+  };
+  // El código del proveedor para un producto (y color): lo último aprendido de las facturas, si no, lo visto en la 39072.
+  function codigoProveedor(pid, color){
+    var k = pid + (color ? '|' + color : '');
+    var aprendidos = (state.config && state.config.codigosProducto) || {};
+    if(aprendidos[k]) return aprendidos[k];
+    var ultimo = '';
+    state.compras.slice().sort(function(a,b){ return String(a.fecha).localeCompare(String(b.fecha)); }).forEach(function(c){
+      (c.items||[]).forEach(function(it){ if(it.codigo && it.productoId===pid && (it.color||'')===(color||'') && !it.repetida) ultimo = it.codigo; });
+    });
+    return ultimo || CODIGOS_VISTOS[k] || '';
+  }
+
   // Cuántas unidades del proveedor trae cada producto (paquete x10, tira x10…)
   function factorProducto(p){
     var m = p && String(p.nombre||'').match(/\b(?:paquete|tira|caja|pack|bolsa)\s*(?:x|de)\s*(\d+)/i);
@@ -1601,7 +1630,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var cid = m.duplicada ? m.duplicada.id : nuevoId('compras');
     var notaMov = 'Compra '+cab.proveedor+(cab.numero?(' N.° '+cab.numero):'');
     var b = writeBatch(fs); var ops = 0;
-    var porProducto = {}; var nuevos = 0; var mapeo = [];
+    var porProducto = {}; var nuevos = 0; var mapeo = []; var codigosAprendidos = [];
     var items = m.lineas.map(function(l){
       var pid = l.productoId || '';
       if(pid==='nuevo'){
@@ -1615,7 +1644,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           b.set(doc(collection(fs,'movimientos')), { tipo:'entrada', productoId:pid, productoNombre:tituloCompra(l.descripcion||l.codigo), cantidad:Number(l.cantidad)||0,
             nota:notaMov, compraId:cid, fecha:todayISO(), usuarioId:state.auth.user.uid, usuarioNombre:nombreUsuario() }); ops++;
         }
-        if(l.codigo) mapeo.push([l.codigo, pid]);
+        if(l.codigo){ mapeo.push([l.codigo, pid]); codigosAprendidos.push([pid, l.codigo]); }
       } else if(pid && pid!=='ignorar'){
         var acc = porProducto[pid] || (porProducto[pid] = { stock:0, porColor:{}, costo:null, lineas:[] });
         var cant = Number(l.stock)||0;
@@ -1623,7 +1652,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(l.color) acc.porColor[l.color] = (acc.porColor[l.color]||0) + cant;
         if(Number(l.costo) > 0) acc.costo = Number(l.costo);
         acc.lineas.push(l);
-        if(l.codigo) mapeo.push([l.codigo, pid]);
+        if(l.codigo){ mapeo.push([l.codigo, pid]); codigosAprendidos.push([pid + (l.color ? '|' + l.color : ''), l.codigo]); }
       } else if(pid==='ignorar' && l.codigo && !l.repetida){ mapeo.push([l.codigo, 'ignorar']); }
       var pr = productoById(pid);
       return { codigo:l.codigo||'', descripcion:l.descripcion||'', cantidad:Number(l.cantidad)||0, precio:Number(l.precio)||0, subtotal:Number(l.subtotal)||0,
@@ -1657,6 +1686,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(mapeo.length){
       var margs = [];
       mapeo.forEach(function(x){ margs.push(new FieldPath('mapeoCompras', String(x[0]).toUpperCase()), x[1]); });
+      codigosAprendidos.forEach(function(x){ margs.push(new FieldPath('codigosProducto', x[0]), String(x[1]).toUpperCase()); });
       b.update(doc(fs, 'config/general'), ...margs); ops++;
     }
     var datosCompra = { proveedor:String(cab.proveedor).trim(), numero:String(cab.numero||'').trim(), fecha:cab.fecha, total:Number(cab.total)||0,
@@ -2079,7 +2109,58 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<div class="card">'+productosHtml+'</div>';
   }
 
+  function renderPedido(){
+    var cant = state.pedido.cant;
+    var filas = state.productos.filter(function(p){ return p.nombre; }).map(function(p){
+      var f = factorProducto(p);
+      var casilla = function(color){
+        var k = p.id + '|' + (color||'');
+        var stockC = color ? ((p.stockPorColor && p.stockPorColor[color]) || 0) : (Number(p.stock)||0);
+        var cod = codigoProveedor(p.id, color);
+        return '<div class="row between" style="padding:6px 0;gap:10px;">'+
+          '<div style="min-width:0;">'+(color ? '<div style="font-weight:600;">'+esc(color)+'</div>' : '')+
+            '<div class="small muted">Stock '+fmtNum(stockC)+' · <span class="mono">'+(cod ? esc(cod) : 'sin código')+'</span></div></div>'+
+          '<input class="pd-cant" type="number" inputmode="numeric" min="0" placeholder="0" data-pk="'+esc(k)+'" value="'+(cant[k]||'')+'" style="width:84px;text-align:center;font-size:17px;font-weight:700;padding:10px 6px;">'+
+        '</div>';
+      };
+      return '<div class="product-row" style="display:block;">'+
+        '<div class="row" style="gap:10px;">'+
+          (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;flex-shrink:0;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
+          '<div class="product-name">'+esc(p.nombre)+(f>1?' <span class="small muted">(pides en '+(/tira/i.test(p.nombre)?'tiras':'paquetes')+' x'+f+')</span>':'')+'</div>'+
+        '</div>'+
+        (p.colores && p.colores.length ? p.colores.map(casilla).join('') : casilla(null))+
+      '</div>';
+    }).join('');
+    return '<div class="row between" style="margin:4px 0 12px;"><h2 class="section-title" style="margin:0;">📝 Pedido a proveedor</h2>'+
+        '<button class="btn btn-sm btn-ghost" data-action="cerrar-pedido">✕ Salir</button></div>'+
+      '<div class="small muted" style="margin-bottom:10px;">Escribe la cantidad que necesitas de cada artículo. No se guarda nada: al salir las casillas quedan en blanco.</div>'+
+      '<div class="card">'+filas+'</div>'+
+      '<div style="position:sticky;bottom:calc(70px + env(safe-area-inset-bottom,0px));background:var(--bg);padding:10px 0;">'+
+        '<div class="row" style="gap:8px;">'+
+          '<button class="btn btn-primary" style="flex:1;padding:13px;" data-action="generar-pedido" id="pd-resumen">'+textoResumenPedido()+'</button>'+
+          '<button class="btn btn-ghost" data-action="limpiar-pedido">Limpiar</button>'+
+        '</div>'+
+      '</div>';
+  }
+  function lineasPedido(){
+    var cant = state.pedido ? state.pedido.cant : {};
+    var out = [];
+    state.productos.forEach(function(p){
+      var colores = (p.colores && p.colores.length) ? p.colores : [null];
+      colores.forEach(function(color){
+        var n = Number(cant[p.id + '|' + (color||'')]) || 0;
+        if(n > 0) out.push({ p:p, color:color, cantidad:n });
+      });
+    });
+    return out;
+  }
+  function textoResumenPedido(){
+    var ls = lineasPedido();
+    return ls.length ? ('Generar pedido · '+ls.length+' artículo'+(ls.length===1?'':'s')) : 'Generar pedido';
+  }
+
   function renderInventario(){
+    if(state.pedido && state.isAdmin) return renderPedido();
     var kpis = '<div class="kpi-grid">'+
       '<div class="kpi"><div class="num mono">'+state.productos.length+'</div><div class="lbl">Productos</div></div>'+
       '<div class="kpi"><div class="num mono">'+state.productos.reduce(function(s,p){return s+(Number(p.stock)||0);},0)+'</div><div class="lbl">Unidades en stock</div></div>'+
@@ -2122,6 +2203,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       (state.isAdmin ? (
         '<div class="row" style="margin-top:12px; gap:8px;">'+
           '<button class="btn btn-primary" style="flex:1" data-action="abrir-nuevo-producto">+ Nuevo producto</button>'+
+          '<button class="btn btn-ghost" style="flex:1" data-action="abrir-pedido">📝 Pedido a proveedor</button>'+
           (assetsApi ? '<button class="btn btn-ghost" style="flex:1" data-action="trigger-bulk-fotos">📷 Subir fotos</button>' : '')+
         '</div>'+
         '<input id="bulk-foto-input" type="file" accept="image/*" multiple style="display:none;">'+
@@ -2993,6 +3075,29 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
     else if(action==='abrir-cobros'){ avisarCobros(true); }
+    else if(action==='abrir-pedido'){ state.pedido = { cant:{} }; render(); window.scrollTo(0,0); }
+    else if(action==='cerrar-pedido'){
+      if(lineasPedido().length && !confirm('¿Salir del pedido? Las cantidades se borran.')) return;
+      state.pedido = null; render();
+    }
+    else if(action==='limpiar-pedido'){ if(state.pedido){ state.pedido.cant = {}; render(); } }
+    else if(action==='generar-pedido'){
+      var lsP = lineasPedido();
+      if(!lsP.length){ toast('Escribe al menos una cantidad'); return; }
+      var eP = cfgEmpresa();
+      var itemsP = lsP.map(function(x){
+        var f = factorProducto(x.p);
+        var unidad = /tira/i.test(x.p.nombre) ? 'tira' : 'paq.';
+        return { nombre: x.p.nombre.replace(/\s*\((paquete|tira)\s*x\s*\d+\)/i, '') + (x.color ? ' – ' + x.color : ''),
+          codigo: codigoProveedor(x.p.id, x.color), cantidad: x.cantidad * f,
+          detalle: f > 1 ? ('(' + x.cantidad + ' ' + unidad + ' x' + f + ')') : '', imagenUrl: x.p.imagenUrl || null };
+      });
+      var hoyP = fechaLocalISO(todayISO());
+      prepararArchivo('Pedido a proveedor', generarPedidoPDF({
+        empresa:{ nombre:eP.empresaNombre, titular:eP.empresaTitular, nit:eP.empresaNit, telefono:eP.empresaTelefono },
+        logoUrl:'icons/icon-512.png', fecha: todayISO(), items: itemsP
+      }).then(function(blob){ return { file: new File([blob], 'Pedido-CasaLED-'+hoyP+'.pdf', {type:'application/pdf'}) }; }));
+    }
     else if(action==='abrir-soporte-dian'){ state.modal = {type:'soporte-dian'}; render(); }
     else if(action==='generar-soporte-dian'){
       var vSD = state.ventas.find(function(x){ return x.id===state.modal.ventaId; });
@@ -3327,6 +3432,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   });
 
   document.addEventListener('input', function(e){
+    if(e.target.classList && e.target.classList.contains('pd-cant') && state.pedido){
+      var vP = Math.max(0, Math.floor(Number(e.target.value)||0));
+      state.pedido.cant[e.target.getAttribute('data-pk')] = vP || '';
+      var bR = document.getElementById('pd-resumen'); if(bR) bR.textContent = textoResumenPedido();
+      return;
+    }
     if(state.modal && state.modal.type==='revisar-compra'){
       var liI = e.target.getAttribute && e.target.getAttribute('data-li');
       if(liI != null){

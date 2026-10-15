@@ -544,3 +544,68 @@ export async function generarSoporteDIAN(datos){
   pie();
   return pdf.salida();
 }
+
+// ---------- Pedido a proveedor (sin precios) ----------
+// datos: { empresa:{nombre, titular, nit, telefono}, logoUrl, fecha, items:[{nombre, codigo, cantidad, detalle, imagenUrl}] }
+export async function generarPedidoPDF(datos){
+  const e = datos.empresa || {}, items = datos.items || [];
+  const logo = await cargarImagenJPEG(datos.logoUrl, 300, '#000000');
+  const fotos = await Promise.all(items.map((it) => cargarImagenJPEG(it.imagenUrl, 140, '#ffffff')));
+  const pdf = new MiniPDF();
+  const M = 30, ANCHO = PAGE_W - 2 * M, LIM = PAGE_H - 44;
+  let pagina = 1;
+  const fechaTxt = fechaCorta(datos.fecha || new Date().toISOString());
+  const pie = () => {
+    pdf.stroke(LINEA); pdf.lineWidth(0.6); pdf.line(M, PAGE_H - 30, PAGE_W - M, PAGE_H - 30);
+    pdf.text((e.nombre || 'Casa LED') + ' · Pedido del ' + fechaTxt, M, PAGE_H - 16, { size: 7.5, color: GRIS });
+    pdf.text('Página ' + pagina, PAGE_W - M, PAGE_H - 16, { size: 7.5, color: GRIS, align: 'right' });
+  };
+  pdf.fill(NEGRO); pdf.rect(0, 0, PAGE_W, 8, 'f');
+  pdf.fill(AZUL); pdf.rect(0, 8, PAGE_W, 2.5, 'f');
+  if(logo) pdf.imageFit(logo, M, 22, 70, 70);
+  pdf.text((e.nombre || 'Casa LED').toUpperCase(), M + 82, 42, { size: 18, bold: true, color: NEGRO });
+  pdf.text([e.titular, e.nit ? 'NIT ' + e.nit : ''].filter(Boolean).join(' · '), M + 82, 57, { size: 8.5, color: GRIS });
+  if(e.telefono) pdf.text('Tel / WhatsApp: ' + e.telefono, M + 82, 69, { size: 8.5, color: GRIS });
+  const wF = 160, xF = PAGE_W - M - wF;
+  pdf.fill(NEGRO); pdf.rect(xF, 22, wF, 24, 'f');
+  pdf.text('PEDIDO', xF + wF / 2, 38, { size: 12, bold: true, color: BLANCO, align: 'center' });
+  pdf.fill(ZEBRA); pdf.rect(xF, 46, wF, 18, 'f');
+  pdf.text('Fecha', xF + 8, 58, { size: 8.5, bold: true, color: GRIS });
+  pdf.text(fechaTxt, xF + wF - 8, 58, { size: 9.5, bold: true, align: 'right' });
+  pdf.stroke(LINEA); pdf.lineWidth(0.8); pdf.rect(xF, 22, wF, 42, 'S');
+  pdf.text('Por favor enviar exactamente las referencias de este pedido (revisar el código de cada artículo).', M, 108, { size: 9, color: AZUL, bold: true });
+  let y = 118;
+
+  const C = [{ t: 'FOTO', w: 60, a: 'center' }, { t: 'CÓDIGO', w: 120, a: 'left' }, { t: 'ARTÍCULO', w: 0, a: 'left' }, { t: 'CANTIDAD', w: 90, a: 'center' }];
+  C[2].w = ANCHO - C.reduce((s, c) => s + c.w, 0);
+  let xC = M; C.forEach((c) => { c.x = xC; xC += c.w; });
+  const cab = () => {
+    pdf.fill(NEGRO); pdf.rect(M, y, ANCHO, 20, 'f');
+    C.forEach((c) => pdf.text(c.t, c.a === 'center' ? c.x + c.w / 2 : c.x + 8, y + 13.5, { size: 8, bold: true, color: BLANCO, align: c.a }));
+    y += 20;
+  };
+  cab();
+  const FILA = 46;
+  items.forEach((it, i) => {
+    if(y + FILA > LIM){ pie(); pdf.addPage(); pagina++; y = 30; cab(); }
+    pdf.fill(i % 2 ? BLANCO : ZEBRA); pdf.rect(M, y, ANCHO, FILA, 'f');
+    if(fotos[i]) pdf.imageFit(fotos[i], C[0].x + 8, y + 4, C[0].w - 16, FILA - 8);
+    const cod = it.codigo || '';
+    pdf.text(cod || '—', C[1].x + 8, y + FILA / 2 + 4, { size: cod ? 10 : 9, bold: !!cod, color: cod ? NEGRO : GRIS });
+    const ls = pdf.envolver(it.nombre || '', C[2].w - 16, 9.5, true, 2);
+    const yTxt = y + FILA / 2 + 4 - (ls.length - 1) * 5.5;
+    ls.forEach((l, k) => pdf.text(l, C[2].x + 8, yTxt + k * 11, { size: 9.5, bold: true, color: NEGRO }));
+    pdf.text(String(it.cantidad), C[3].x + C[3].w / 2, y + FILA / 2 + (it.detalle ? 1 : 5), { size: 13, bold: true, color: AZUL, align: 'center' });
+    if(it.detalle) pdf.text(it.detalle, C[3].x + C[3].w / 2, y + FILA / 2 + 13, { size: 7.5, color: GRIS, align: 'center' });
+    pdf.stroke(LINEA); pdf.lineWidth(0.5); pdf.line(M, y + FILA, M + ANCHO, y + FILA);
+    y += FILA;
+  });
+  if(y + 40 > LIM){ pie(); pdf.addPage(); pagina++; y = 30; }
+  const totalU = items.reduce((s, it) => s + (Number(it.cantidad) || 0), 0);
+  y += 10;
+  pdf.fill(AZUL_CLARO); pdf.rect(M, y, ANCHO, 26, 'f');
+  pdf.text(items.length + ' referencia(s)', M + 10, y + 17, { size: 10, bold: true, color: NEGRO });
+  pdf.text('Total: ' + totalU.toLocaleString('es-CO') + ' unidades', M + ANCHO - 10, y + 17, { size: 11, bold: true, color: AZUL, align: 'right' });
+  pie();
+  return pdf.salida();
+}
