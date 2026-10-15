@@ -173,6 +173,11 @@ const NEGRO = [11, 15, 22], AZUL = [24, 100, 209], AZUL_CLARO = [232, 240, 252],
  *   items: [{nombre, cantidad, precio, subtotal, imagenUrl}]
  * }
  */
+// Persona natural no responsable de IVA y no facturadora electrónica: el documento es una cuenta de cobro.
+export const TITULO_DOC = 'Cuenta de cobro';
+export const LEYENDA_DOC = 'Documento expedido por persona natural no responsable del IVA (art. 437, parágrafo 3, del Estatuto Tributario), ' +
+  'no obligada a expedir factura de venta (art. 1.6.1.4.3 del Decreto 1625 de 2016). No es factura electrónica de venta y no se cobra IVA.';
+
 export async function generarFacturaPDF(datos){
   const e = datos.empresa || {}, v = datos.venta || {}, cl = datos.cliente || {};
   const items = datos.items || [];
@@ -195,7 +200,7 @@ export async function generarFacturaPDF(datos){
     pdf.text('Iluminación LED y accesorios para motos', xE, 54, { size: 9, color: AZUL, bold: true });
     let yE = 69;
     const lineasEmp = [
-      e.nit ? 'NIT: ' + e.nit : '',
+      [e.titular, e.nit ? 'NIT ' + e.nit : '', 'No responsable de IVA'].filter(Boolean).join(' · '),
       [e.direccion, e.ciudad].filter(Boolean).join(' · '),
       e.telefono ? 'Tel / WhatsApp: ' + e.telefono : '',
       [e.email, e.instagram, e.web].filter(Boolean).join('  ·  ')
@@ -205,7 +210,7 @@ export async function generarFacturaPDF(datos){
     // Caja de factura
     const wF = 168, xF = PAGE_W - M - wF, yF = 22;
     pdf.fill(NEGRO); pdf.rect(xF, yF, wF, 24, 'f');
-    pdf.text('FACTURA DE VENTA', xF + wF / 2, yF + 16, { size: 11, bold: true, color: BLANCO, align: 'center' });
+    pdf.text(TITULO_DOC.toUpperCase(), xF + wF / 2, yF + 16, { size: 11, bold: true, color: BLANCO, align: 'center' });
     pdf.stroke(LINEA); pdf.lineWidth(0.8);
     const filas = [
       ['N.°', String(v.numero || '')],
@@ -272,7 +277,7 @@ export async function generarFacturaPDF(datos){
 
   function continuacion(){
     pdf.fill(NEGRO); pdf.rect(0, 0, PAGE_W, 4, 'f');
-    pdf.text((e.nombre || 'Casa LED') + ' · Factura de venta N.° ' + (v.numero || '') + ' · ' + (cl.nombre || '') + ' (continuación)', M, 24, { size: 9, bold: true, color: GRIS });
+    pdf.text((e.nombre || 'Casa LED') + ' · ' + TITULO_DOC + ' N.° ' + (v.numero || '') + ' · ' + (cl.nombre || '') + ' (continuación)', M, 24, { size: 9, bold: true, color: GRIS });
     return 36;
   }
 
@@ -351,9 +356,10 @@ export async function generarFacturaPDF(datos){
 
   // Notas
   const notas = (e.notas || '').split(/\n+/).map((s) => s.trim()).filter(Boolean);
-  if(notas.length){
+  {
     const lineasN = [];
     notas.forEach((n) => pdf.envolver(n, ANCHO - 24, 8.5, false).forEach((l) => lineasN.push(l)));
+    pdf.envolver(LEYENDA_DOC, ANCHO - 24, 8.5, false).forEach((l) => lineasN.push(l));
     const hN = 18 + lineasN.length * 11;
     if(yN + hN > LIMITE){ pie(); pdf.addPage(); pagina++; yN = continuacion() + 6; }
     pdf.stroke(LINEA); pdf.rect(M, yN, ANCHO, hN, 'S');
@@ -361,7 +367,7 @@ export async function generarFacturaPDF(datos){
     lineasN.forEach((l, k) => pdf.text(l, M + 12, yN + 26 + k * 11, { size: 8.5, color: GRIS }));
     yN += hN + 16;
   }
-  pdf.text('¡Gracias por su compra!', PAGE_W / 2, Math.min(yN + 6, LIMITE), { size: 11, bold: true, color: AZUL, align: 'center' });
+  if(yN + 6 <= LIMITE) pdf.text('¡Gracias por su compra!', PAGE_W / 2, yN + 6, { size: 11, bold: true, color: AZUL, align: 'center' });
   pie();
 
   return pdf.salida();
