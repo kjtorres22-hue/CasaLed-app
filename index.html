@@ -716,7 +716,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       'interruptor-4funciones':7905, 'interruptor-led-2funciones':4250,
       'modulos-led-unicolor':8500, 'candado-alarma':28900, 'portaplaca-acero':4800,
       'correa-honda-navi':26775, 'correa-bws':30770, 'correa-akt-jets':29070, 'correa-agility':28645
-    }}
+    }},
+    { id:'eliminar_devil_lupa', mensaje:'Exploradora Devil Lupa eliminada', eliminar:['exploradora-devil-lupa'] }
   ];
   var migrando = false;
   function aplicarMigraciones(){
@@ -729,6 +730,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     pendientes.forEach(function(m){
       Object.keys(m.costos||{}).forEach(function(pid){
         if(productoById(pid)){ b.update(doc(fs, 'productos/'+pid), {costoCompra:m.costos[pid]}); n++; }
+      });
+      (m.eliminar||[]).forEach(function(pid){
+        if(productoById(pid)){ b.delete(doc(fs, 'productos/'+pid)); n++; }
       });
       marcas['migraciones.'+m.id] = todayISO();
     });
