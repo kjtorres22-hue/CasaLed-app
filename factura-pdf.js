@@ -342,6 +342,18 @@ export async function generarFacturaPDF(datos){
 
   let yN = Math.max(yT, y + 60) + 10;
 
+  // Compromiso de pago (créditos con saldo)
+  if(credito && v.fechaVencimiento && (Number(v.saldo) || 0) > 0){
+    const txt = 'El cliente se compromete a pagar el saldo pendiente de ' + cop(v.saldo) + ' a más tardar el ' + fechaCorta(v.fechaVencimiento) + '.';
+    const ls = pdf.envolver(txt, ANCHO - 24, 10, true);
+    const hP = 12 + ls.length * 13;
+    if(yN + hP > LIMITE){ pie(); pdf.addPage(); pagina++; yN = continuacion() + 6; }
+    pdf.fill([253, 236, 236]); pdf.rect(M, yN, ANCHO, hP, 'f');
+    pdf.fill(ROJO); pdf.rect(M, yN, 3, hP, 'f');
+    ls.forEach((l, k) => pdf.text(l, M + 12, yN + 15 + k * 13, { size: 10, bold: true, color: ROJO }));
+    yN += hP + 8;
+  }
+
   // Comentarios del vendedor
   const comentarios = String(v.comentarios || '').trim();
   if(comentarios){

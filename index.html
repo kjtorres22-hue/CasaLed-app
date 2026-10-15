@@ -1285,6 +1285,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         lineas.push('Abono: '+fmtCOP(pago.abono||0)+((pago.abono>0 && pago.medio)?(' ('+nombreMedio(pago.medio)+')'):''));
         lineas.push('*Saldo pendiente: '+fmtCOP(Math.max(0,total-(pago.abono||0)))+'*');
         if(pago.vence) lineas.push('*Vence: '+new Date(pago.vence).toLocaleDateString('es-CO')+'*');
+        var saldoTF = Math.max(0,total-(pago.abono||0));
+        if(saldoTF > 0 && pago.vence){
+          lineas.push('');
+          lineas.push('El cliente se compromete a pagar el saldo pendiente de '+fmtCOP(saldoTF)+' a más tardar el '+new Date(pago.vence).toLocaleDateString('es-CO')+'.');
+          lineas.push('👉 Por favor responde *ACEPTO* para confirmar que recibiste la mercancía y que pagarás en esa fecha.');
+        }
       } else {
         lineas.push('Forma de pago: *CONTADO* ✅ Pagado'+(pago.medio?(' en '+nombreMedio(pago.medio).toLowerCase()):''));
       }
@@ -1321,6 +1327,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(venta.tipoPago==='credito'){
       lineas.push('Abono: '+fmtCOP(venta.abono)+' · Saldo pendiente: *'+fmtCOP(venta.saldo)+'*');
       var vMsg = vencimientoDe(venta); if(vMsg) lineas.push('Vence: *'+new Date(vMsg).toLocaleDateString('es-CO')+'*');
+      if(vMsg && (Number(venta.saldo)||0) > 0){
+        lineas.push('');
+        lineas.push('👉 Por favor responde *ACEPTO* para confirmar que recibiste la mercancía y que pagarás el saldo de '+fmtCOP(venta.saldo)+' a más tardar el '+new Date(vMsg).toLocaleDateString('es-CO')+'.');
+      }
     }
     lineas.push('¡Gracias por tu compra!');
     return lineas.join('\n');
