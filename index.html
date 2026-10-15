@@ -2065,6 +2065,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '</select>'+
       (jornada && !clientesRuta.length ? '<div class="small muted" style="margin-top:8px;">No hay clientes en '+esc(jornada.rutaNombre)+'. Lo puedes crear al revisar la factura.</div>' : '')+
       (clienteSel && clienteSel.direccion ? '<div class="small muted" style="margin-top:8px;">'+esc(clienteSel.direccion)+'</div>' : '') +
+      (clienteSel ? '<div class="small" style="margin-top:6px;font-weight:600;">🕒 '+esc(textoUltimaCompra(clienteSel.id))+'</div>' : '') +
       '</div>';
 
     var productosHtml = state.productos.length ? state.productos.map(function(p){
@@ -2281,7 +2282,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var grupos = state.rutas.map(function(r){
       var lista = state.clientes.filter(function(c){return c.rutaId===r.id;});
       if(!lista.length) return '';
-      return '<h2 class="section-title">'+esc(r.nombre)+'</h2><div class="card">'+
+      var nNo = lista.filter(function(c){ return noComproUltimaRuta(c); }).length;
+      return '<h2 class="section-title">'+esc(r.nombre)+(nNo?(' <span class="small" style="color:var(--red);font-weight:600;">· 🔴 '+nNo+' no compraron en la última salida</span>'):'')+'</h2><div class="card">'+
         lista.map(clienteRowHtml).join('') + '</div>';
     }).join('');
     var sinRutaHtml = sinRuta.length ? '<h2 class="section-title">Sin ruta</h2><div class="card">'+sinRuta.map(clienteRowHtml).join('')+'</div>' : '';
@@ -2297,11 +2299,40 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       grupos + sinRutaHtml +
       '<button class="btn btn-primary btn-block" data-action="abrir-nuevo-cliente" style="margin-top:12px;">+ Nuevo cliente</button>';
   }
+  // Última compra de un cliente (la factura más reciente)
+  function ultimaCompra(clienteId){
+    var u = null;
+    state.ventas.forEach(function(v){ if(v.clienteId===clienteId && (!u || String(v.fecha) > String(u.fecha))) u = v; });
+    return u;
+  }
+  function textoUltimaCompra(clienteId){
+    var u = ultimaCompra(clienteId);
+    if(!u) return 'Sin compras registradas';
+    var dias = Math.round((new Date(fechaLocalISO(todayISO())) - new Date(fechaLocalISO(u.fecha))) / 864e5);
+    return 'Última compra: '+new Date(u.fecha).toLocaleDateString('es-CO')+' ('+(dias<=0?'hoy':dias===1?'hace 1 día':'hace '+dias+' días')+') · #'+u.numero+' · '+fmtCOP(u.total);
+  }
+  // Última salida cerrada de cada ruta
+  function ultimaSalidaCerrada(rutaId){
+    var u = null;
+    state.jornadas.forEach(function(j){ if(j.rutaId===rutaId && j.estado==='cerrada' && (!u || String(j.cerradaEn||j.iniciadaEn) > String(u.cerradaEn||u.iniciadaEn))) u = j; });
+    return u;
+  }
+  // Punto rojo: el cliente no compró en la última salida cerrada de su ruta (ni después)
+  function noComproUltimaRuta(c){
+    if(!c.rutaId) return null;
+    var j = ultimaSalidaCerrada(c.rutaId); if(!j) return null;
+    if(c.creadoEn && String(c.creadoEn) > String(j.cerradaEn||'')) return null;
+    var compro = state.ventas.some(function(v){ return v.clienteId===c.id && (v.jornadaId===j.id || String(v.fecha) >= String(j.iniciadaEn)); });
+    return compro ? null : j;
+  }
+
   function clienteRowHtml(c){
+    var jNo = noComproUltimaRuta(c);
     return '<div class="product-row">'+
       '<div>'+
-        '<div class="product-name">'+esc(c.nombre)+'</div>'+
+        '<div class="product-name">'+(jNo?'<span title="No compró en la última ruta" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--red);margin-right:6px;vertical-align:middle;"></span>':'')+esc(c.nombre)+'</div>'+
         '<div class="product-sub">'+esc(c.telefono||'')+(c.direccion?(' · '+esc(c.direccion)):'')+'</div>'+
+        (jNo ? '<div class="small" style="color:var(--red);margin-top:2px;">No compró en la salida del '+esc(new Date(jNo.cerradaEn||jNo.iniciadaEn).toLocaleDateString('es-CO'))+'</div>' : '')+
       '</div>'+
       '<div class="row">'+
         '<button class="btn btn-sm btn-ghost" data-action="abrir-editar-cliente" data-id="'+c.id+'">✎</button>'+
@@ -2679,7 +2710,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
               var ru = rutaById(c.rutaId);
               return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+(ru?(' · '+esc(ru.nombre)):'')+'</option>';
             }).join('')+
-          '</select></div>');
+          '</select>'+
+          (state.selectedClienteId && clienteById(state.selectedClienteId) ? '<div class="small" style="margin-top:6px;font-weight:600;">🕒 '+esc(textoUltimaCompra(state.selectedClienteId))+'</div>' : '')+
+          '</div>');
       html = '<h3>'+(state.editandoVenta?('Editar factura #'+state.editandoVenta.numero):'Revisar factura')+'</h3>'+
         bloqueCliente+
         '<label>Forma de pago</label>'+
