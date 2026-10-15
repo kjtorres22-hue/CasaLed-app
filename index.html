@@ -330,7 +330,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -555,6 +555,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     db.collection('ventas').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.ventas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render({preservar:true});
+      if(!state.cobrosRevisados){ state.cobrosRevisados = true; setTimeout(function(){ avisarCobros(false); }, 900); }
+      actualizarInsignia();
     });
     db.collection('gastos').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.gastos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
@@ -1313,6 +1315,41 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(v.tipoPago!=='credito') return null;
     return v.fechaVencimiento || fechaVencimiento(v.fecha, clienteById(v.clienteId));
   }
+  // ---------- COBROS: créditos que llegaron a la fecha máxima de pago sin pagar ----------
+  function cobrosPendientes(){
+    var hoy = fechaLocalISO(new Date().toISOString());
+    return state.ventas.filter(function(v){
+      if(v.tipoPago!=='credito' || !((Number(v.saldo)||0) > 0)) return false;
+      var venc = vencimientoDe(v); return venc && fechaLocalISO(venc) <= hoy;
+    }).sort(function(a,b){ return String(vencimientoDe(a)).localeCompare(String(vencimientoDe(b))); });
+  }
+  function mensajeRecordatorio(v){
+    var c = clienteById(v.clienteId) || {};
+    var e = cfgEmpresa();
+    return 'Hola '+(c.nombre||v.clienteNombre||'')+' 👋, te saluda '+(e.empresaNombre||'Casa LED')+'.\n'+
+      'Te recordamos amablemente tu compromiso de pago de la cuenta de cobro N.° '+v.numero+', con saldo pendiente de '+fmtCOP(v.saldo)+
+      ' y fecha acordada de pago el '+new Date(vencimientoDe(v)).toLocaleDateString('es-CO')+'.\n'+
+      'Te agradecemos realizar el pago dentro del plazo establecido.\n\n'+
+      '¡Gracias por tu confianza! 🙌';
+  }
+  var ultimoAvisoCobros = 0;
+  function avisarCobros(forzar){
+    if(!state.isAdmin || state.auth.status!=='ready') return;
+    var lista = cobrosPendientes();
+    actualizarInsignia();
+    if(!lista.length && !forzar) return;
+    if(!forzar && (state.modal || Date.now() - ultimoAvisoCobros < 2*3600*1000)) return;
+    ultimoAvisoCobros = Date.now();
+    state.modal = {type:'cobros'}; render();
+  }
+  function actualizarInsignia(){
+    try{
+      if(!state.isAdmin || !navigator.setAppBadge) return;
+      var n = cobrosPendientes().length;
+      if(n) navigator.setAppBadge(n); else if(navigator.clearAppBadge) navigator.clearAppBadge();
+    }catch(e){}
+  }
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden && state.ventas.length) avisarCobros(false); });
   function nombreMedio(m){ return m==='transferencia' ? 'Transferencia' : (m==='efectivo' ? 'Efectivo' : ''); }
   function urlWhatsapp(telefono, texto){
     var tel = (telefono||'').replace(/[^0-9]/g,'');
@@ -2415,7 +2452,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(totalDeuda)+'</div><div class="lbl">Deben en '+esc(nombreRutaHist)+'</div></div>'+
       '</div>'+
       '<h2 class="section-title">Salidas a ruta</h2><div class="card">'+jornadasHtml+'</div>'+
-      '<h2 class="section-title">Deudores</h2><div class="card">'+deudoresHtml+'</div>'+
+      '<div class="row between" style="margin:18px 0 10px;"><h2 class="section-title" style="margin:0;">Deudores</h2>'+
+        (state.isAdmin ? (function(){ var nC = cobrosPendientes().length; return '<button class="btn btn-sm '+(nC?'btn-primary':'btn-ghost')+'" data-action="abrir-cobros">🔔 Cobros pendientes'+(nC?(' ('+nC+')'):'')+'</button>'; })() : '')+'</div>'+
+      '<div class="card">'+deudoresHtml+'</div>'+
       '<h2 class="section-title">Gastos'+(gastosRuta.length?(' · <span class="mono">'+fmtCOP(totalGastosF)+'</span>'):'')+'</h2><div class="card">'+gastosHistHtml+'</div>'+
       '<div class="row between" style="margin:18px 0 10px;"><h2 class="section-title" style="margin:0;">Facturas</h2>'+
         '<button class="btn btn-sm btn-ghost" data-action="abrir-soporte-dian">📑 Generar soporte DIAN</button></div>'+
@@ -2571,6 +2610,28 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='cobros'){
+      var listaC = cobrosPendientes();
+      var hoyC = fechaLocalISO(new Date().toISOString());
+      html = '<h3>🔔 Cobros pendientes</h3>'+
+        (listaC.length ? '<div class="small muted" style="margin-bottom:10px;">Créditos sin pagar que ya llegaron a la fecha máxima de pago. Total: <strong>'+fmtCOP(listaC.reduce(function(s2,v){ return s2+(Number(v.saldo)||0); },0))+'</strong></div>' +
+          listaC.map(function(v){
+            var c = clienteById(v.clienteId) || {};
+            var tel = c.telefono || v.clienteTelefono || '';
+            var vencISO = fechaLocalISO(vencimientoDe(v));
+            var dias = Math.round((new Date(hoyC) - new Date(vencISO)) / 864e5);
+            var estado = dias <= 0 ? '<span style="color:var(--amber);font-weight:700;">Vence hoy</span>' : '<span style="color:var(--red);font-weight:700;">Vencido hace '+dias+' día'+(dias===1?'':'s')+'</span>';
+            return '<div class="list-item"><div class="row between" style="align-items:flex-start;gap:10px;">'+
+              '<div><div class="product-name">'+esc(c.nombre||v.clienteNombre||'')+' <span class="muted small">#'+v.numero+'</span></div>'+
+                '<div class="small">'+estado+' · '+esc(new Date(vencimientoDe(v)).toLocaleDateString('es-CO'))+'</div>'+
+                '<div class="small muted">'+esc(v.rutaNombre||'')+(v.recordadoEn?(' · recordado el '+esc(new Date(v.recordadoEn).toLocaleDateString('es-CO'))):'')+'</div></div>'+
+              '<div style="text-align:right;"><div class="mono" style="font-weight:800;color:var(--red);">'+fmtCOP(v.saldo)+'</div>'+
+                (tel ? '<a class="btn btn-sm btn-primary recordar-cobro" style="margin-top:6px;display:inline-block;text-decoration:none;" data-venta="'+v.id+'" href="'+esc(urlWhatsapp(tel, mensajeRecordatorio(v)))+'" target="_blank" rel="noopener">📲 Recordar</a>'
+                  : '<div class="small muted" style="margin-top:6px;">Sin teléfono</div>')+
+              '</div></div></div>';
+          }).join('')
+        : '<div class="empty" style="padding:20px;">No hay créditos vencidos. 👌</div>')+
+        '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="cerrar-modal">Cerrar</button>';
     } else if(state.modal.type==='soporte-dian'){
       var sd = state.modal; var rutSD = state.config && state.config.rut;
       var ventasSD = state.ventas.slice().sort(function(a,b){ return (b.numero||0)-(a.numero||0); }).slice(0, 300);
@@ -2931,6 +2992,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       prepararArchivo('Facturas de compra · '+nombreMes(ymC), paqueteComprasMes(ymC));
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
+    else if(action==='abrir-cobros'){ avisarCobros(true); }
     else if(action==='abrir-soporte-dian'){ state.modal = {type:'soporte-dian'}; render(); }
     else if(action==='generar-soporte-dian'){
       var vSD = state.ventas.find(function(x){ return x.id===state.modal.ventaId; });
@@ -3394,6 +3456,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       db.doc('usuarios/'+uidRol).update({rol:e.target.value});
       toast('Rol actualizado');
     }
+  });
+
+  // Al tocar "Recordar" se abre WhatsApp y queda anotado el día del recordatorio
+  document.addEventListener('click', function(e){
+    var a = e.target.closest && e.target.closest('a.recordar-cobro');
+    if(!a || !state.isAdmin) return;
+    var idV = a.getAttribute('data-venta');
+    enSegundoPlano(updateDoc(doc(fs, 'ventas/'+idV), { recordadoEn: todayISO() }));
   });
 
   // Pegar la factura en el recuadro punteado

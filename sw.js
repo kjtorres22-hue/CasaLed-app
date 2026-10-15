@@ -1,6 +1,6 @@
 // Service worker de Casa LED: permite abrir la app sin señal.
 // Los datos (Firestore) los maneja Firebase con su propia caché; aquí solo se guardan los archivos de la app.
-const VERSION = 'casaled-v23';
+const VERSION = 'casaled-v24';
 const APP_SHELL = [
   './',
   'index.html',
