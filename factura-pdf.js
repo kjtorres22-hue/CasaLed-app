@@ -216,6 +216,7 @@ export async function generarFacturaPDF(datos){
       ['N.°', String(v.numero || '')],
       ['Fecha', fechaCorta(v.fecha)],
       ['Pago', v.tipoPago === 'credito' ? 'Crédito' : 'Contado'],
+      ...(v.tipoPago === 'credito' && v.fechaVencimiento ? [['Vence', fechaCorta(v.fechaVencimiento)]] : []),
       ['Asesor', v.vendedorNombre || '']
     ];
     let yR = yF + 24;
@@ -227,7 +228,7 @@ export async function generarFacturaPDF(datos){
       yR += 16;
     });
     pdf.rect(xF, yF, wF, yR - yF, 'S');
-    return 116;
+    return Math.max(116, yR + 10);
   }
 
   function cajaCliente(y){
@@ -336,7 +337,8 @@ export async function generarFacturaPDF(datos){
   pdf.text('FORMA DE PAGO', M + 10, y + 16, { size: 8, bold: true, color: GRIS });
   const medioTxt = v.medioPago === 'transferencia' ? 'TRANSFERENCIA' : (v.medioPago === 'efectivo' ? 'EFECTIVO' : '');
   pdf.text(credito ? 'CRÉDITO' : ('CONTADO' + (medioTxt ? ' · ' + medioTxt : ' · PAGADO')), M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
-  pdf.text(items.length + ' referencia(s) · ' + unidades + ' unidad(es)', M + 10, y + 50, { size: 9, color: GRIS });
+  if(credito && v.fechaVencimiento) pdf.text('Vence el ' + fechaCorta(v.fechaVencimiento), M + 10, y + 50, { size: 10, bold: true, color: ROJO });
+  pdf.text(items.length + ' referencia(s) · ' + unidades + ' unidad(es)', M + 10, y + (credito && v.fechaVencimiento ? 66 : 50), { size: 9, color: GRIS });
 
   let yN = Math.max(yT, y + 60) + 10;
 
@@ -509,6 +511,7 @@ export async function generarSoporteDIAN(datos){
     ['Descuentos', '$0'],
     ['Valor total', cop(v.total)],
     ['Forma de pago', credito ? 'Crédito (código 2)' : 'Contado (código 1)'],
+    ...(credito && v.fechaVencimiento ? [['Fecha de vencimiento', new Date(v.fechaVencimiento).toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' })]] : []),
     ['Medio de pago', medio || 'No registrado'],
   ].concat(credito ? [['Abono recibido', cop(v.abono)], ['Saldo pendiente', cop(v.saldo)]] : []));
 

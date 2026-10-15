@@ -973,7 +973,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   async function crearCliente(data){
     var doc = {
       nombre:data.nombre, telefono:data.telefono||'', direccion:data.direccion||'', rutaId:data.rutaId||null,
-      documento:data.documento||'', ciudad:data.ciudad||'', creadoEn:todayISO()
+      documento:data.documento||'', ciudad:data.ciudad||'', plazoCredito:Number(data.plazoCredito)||8, creadoEn:todayISO()
     };
     var ref = await db.collection('clientes').add(doc);
     return Object.assign({id:ref.id}, doc);
@@ -1061,6 +1061,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         rutaId:(jornadaVenta?jornadaVenta.rutaId:(cliente.rutaId||null)), rutaNombre:(jornadaVenta?jornadaVenta.rutaNombre:(ruta?ruta.nombre:'')),
         jornadaId:jornadaVenta?jornadaVenta.id:null, items:items, total:total,
         tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago:medioPago, fecha:fecha,
+        fechaVencimiento: tipoPago==='credito' ? fechaVencimiento(fecha, cliente) : null,
         comentarios:(state.checkoutComentarios||'').trim(),
         vendedorId:state.auth.user.uid, vendedorNombre:nombreUsuario()
       };
@@ -1159,6 +1160,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
       rutaId:cliente.rutaId||orig.rutaId||null, rutaNombre:ruta?ruta.nombre:(orig.rutaNombre||''),
       items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago: abono > 0 ? (state.checkoutMedio || 'efectivo') : null,
+      fechaVencimiento: tipoPago==='credito' ? (orig.fechaVencimiento || fechaVencimiento(orig.fecha, clienteById(cliente.id) || cliente)) : null,
       comentarios:(state.checkoutComentarios||'').trim(),
       editadoEn:fecha, editadoPor:nombreUsuario()
     };
@@ -1282,6 +1284,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         lineas.push('Forma de pago: *CRÉDITO*');
         lineas.push('Abono: '+fmtCOP(pago.abono||0)+((pago.abono>0 && pago.medio)?(' ('+nombreMedio(pago.medio)+')'):''));
         lineas.push('*Saldo pendiente: '+fmtCOP(Math.max(0,total-(pago.abono||0)))+'*');
+        if(pago.vence) lineas.push('*Vence: '+new Date(pago.vence).toLocaleDateString('es-CO')+'*');
       } else {
         lineas.push('Forma de pago: *CONTADO* ✅ Pagado'+(pago.medio?(' en '+nombreMedio(pago.medio).toLowerCase()):''));
       }
@@ -1293,6 +1296,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     lineas.push(SEP);
     lineas.push('¡Gracias por su compra!');
     return lineas.join('\n');
+  }
+  // Vencimiento de un crédito: fecha de la cuenta de cobro + plazo del cliente (8 días, o 15 para algunos)
+  function fechaVencimiento(fechaISO, cliente){
+    var dias = (cliente && Number(cliente.plazoCredito)) || 8;
+    var d = new Date(fechaISO || Date.now()); d.setDate(d.getDate() + dias);
+    return d.toISOString();
+  }
+  function vencimientoDe(v){
+    if(v.tipoPago!=='credito') return null;
+    return v.fechaVencimiento || fechaVencimiento(v.fecha, clienteById(v.clienteId));
   }
   function nombreMedio(m){ return m==='transferencia' ? 'Transferencia' : (m==='efectivo' ? 'Efectivo' : ''); }
   function urlWhatsapp(telefono, texto){
@@ -1307,6 +1320,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     ];
     if(venta.tipoPago==='credito'){
       lineas.push('Abono: '+fmtCOP(venta.abono)+' · Saldo pendiente: *'+fmtCOP(venta.saldo)+'*');
+      var vMsg = vencimientoDe(venta); if(vMsg) lineas.push('Vence: *'+new Date(vMsg).toLocaleDateString('es-CO')+'*');
     }
     lineas.push('¡Gracias por tu compra!');
     return lineas.join('\n');
@@ -1317,7 +1331,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       empresa: { nombre:e.empresaNombre, titular:e.empresaTitular, nit:e.empresaNit, direccion:e.empresaDireccion, ciudad:e.empresaCiudad,
         telefono:e.empresaTelefono, email:e.empresaEmail, instagram:e.empresaInstagram, web:e.empresaWeb, notas:e.notasFactura },
       logoUrl: 'icons/icon-512.png',
-      venta: venta,
+      venta: Object.assign({}, venta, { fechaVencimiento: vencimientoDe(venta) }),
       cliente: { nombre:cliente.nombre, documento:cliente.documento||'', direccion:cliente.direccion||'', ciudad:cliente.ciudad||'', telefono:cliente.telefono||'' },
       items: (venta.items||[]).map(function(it){
         var p = productoById(it.productoId);
@@ -1664,14 +1678,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   async function paqueteVentasMes(ym){
     var ventas = state.ventas.filter(function(v){ return mesDe(fechaLocalISO(v.fecha))===ym; }).sort(function(a,b){ return (a.numero||0)-(b.numero||0); });
     var archivos = [];
-    var filas = [['Cuenta de cobro N.°','Fecha','Cliente','NIT/CC','Teléfono','Ruta','Vendedor','Forma de pago','Medio de pago','Total','Abono','Saldo','Comentarios']];
+    var filas = [['Cuenta de cobro N.°','Fecha','Cliente','NIT/CC','Teléfono','Ruta','Vendedor','Forma de pago','Vence','Medio de pago','Total','Abono','Saldo','Comentarios']];
     for(var i = 0; i < ventas.length; i++){
       var v = ventas[i];
       var cli = clienteById(v.clienteId) || {nombre:v.clienteNombre, telefono:v.clienteTelefono};
       var blob = await generarFacturaPDF(datosPdf(v, cli));
       archivos.push({ nombre:'Cuenta-de-cobro-'+v.numero+'.pdf', bytes:new Uint8Array(await blob.arrayBuffer()) });
       filas.push([v.numero, fechaLocalISO(v.fecha), v.clienteNombre||'', cli.documento||'', v.clienteTelefono||'', v.rutaNombre||'', v.vendedorNombre||'',
-        v.tipoPago==='credito'?'Crédito':'Contado', nombreMedio(v.medioPago), v.total||0, v.abono||0, v.saldo||0, v.comentarios||'']);
+        v.tipoPago==='credito'?'Crédito':'Contado', vencimientoDe(v) ? fechaLocalISO(vencimientoDe(v)) : '', nombreMedio(v.medioPago), v.total||0, v.abono||0, v.saldo||0, v.comentarios||'']);
     }
     archivos.push({ nombre:'Resumen-ventas-'+ym+'.csv', bytes:csvBytes(filas) });
     return { file:new File([crearZip(archivos)], 'CasaLED-ventas-'+ym+'.zip', {type:'application/zip'}), cantidad:ventas.length };
@@ -1731,7 +1745,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   function reenviarFactura(venta){
     var cliente = clienteById(venta.clienteId) || {nombre:venta.clienteNombre, telefono:venta.clienteTelefono, direccion:''};
     var cfg = state.config || {empresaNombre:'Casa LED'};
-    var pago = {tipo:venta.tipoPago||'contado', abono:venta.abono, medio:venta.medioPago};
+    var pago = {tipo:venta.tipoPago||'contado', abono:venta.abono, medio:venta.medioPago, vence:vencimientoDe(venta)};
     enviarFacturaWhatsapp(venta.numero, cliente, venta.items, venta.total, cfg, pago);
   }
 
@@ -2462,7 +2476,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var totalRF = itemsRF.reduce(function(s,it){return s+it.subtotal;},0);
       var clienteRF = clienteCheckout();
       var cfgRF = cfgEmpresa();
-      var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF, medio: state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim()};
+      var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF, medio: state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim(),
+        vence: state.checkoutPago==='credito' ? (state.editandoVenta && state.editandoVenta.fechaVencimiento ? state.editandoVenta.fechaVencimiento : fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), clienteById(state.selectedClienteId) || clienteRF)) : null};
       var saldoRF = Math.max(0, totalRF - (pagoRF.abono||0));
       var previewTexto = textoFactura('(sin asignar)', clienteRF, itemsRF, totalRF, cfgRF, pagoRF);
       var nc = state.modal.nc || {};
@@ -2802,6 +2817,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="field"><label>NIT / CC (opcional)</label><input id="mc-documento" inputmode="numeric" value="'+esc(c.documento||'')+'"></div>'+
           '<div class="field"><label>Ciudad (opcional)</label><input id="mc-ciudad" value="'+esc(c.ciudad||'')+'"></div>'+
         '</div>'+
+        '<div class="field"><label>Plazo de crédito</label><select id="mc-plazo">'+
+          [8,15].map(function(d){ return '<option value="'+d+'"'+((Number(c.plazoCredito)||8)===d?' selected':'')+'>'+d+' días</option>'; }).join('')+
+        '</select></div>'+
         '<div class="field"><label>Ruta</label><select id="mc-ruta">'+
           '<option value="">Sin ruta</option>'+
           state.rutas.map(function(r){return '<option value="'+r.id+'"'+(c.rutaId===r.id?' selected':'')+'>'+esc(r.nombre)+'</option>';}).join('')+
@@ -2911,7 +2929,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var cSD = clienteById(vSD.clienteId) || {nombre:vSD.clienteNombre, telefono:vSD.clienteTelefono};
       var eSD = cfgEmpresa();
       prepararArchivo('Soporte DIAN · cuenta de cobro N.° '+vSD.numero, generarSoporteDIAN({
-        rut: rutG, empresa:{ nombre:eSD.empresaNombre, telefono:eSD.empresaTelefono }, venta: vSD,
+        rut: rutG, empresa:{ nombre:eSD.empresaNombre, telefono:eSD.empresaTelefono }, venta: Object.assign({}, vSD, { fechaVencimiento: vencimientoDe(vSD) }),
         cliente: { nombre:cSD.nombre||'', documento:cSD.documento||'', direccion:cSD.direccion||'', ciudad:cSD.ciudad||'', telefono:cSD.telefono||'' },
         items: vSD.items||[]
       }).then(function(blob){ return { file: new File([blob], 'Soporte-DIAN-cuenta-de-cobro-'+vSD.numero+'.pdf', {type:'application/pdf'}) }; }));
@@ -3200,11 +3218,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var rutaC = document.getElementById('mc-ruta').value;
       var docC = document.getElementById('mc-documento').value.trim();
       var ciuC = document.getElementById('mc-ciudad').value.trim();
+      var plazoC = Number(document.getElementById('mc-plazo').value)||8;
       if(!nombreC){ toast('El nombre es obligatorio'); return; }
       if(state.modal.type==='editar-cliente'){
-        await editarCliente(state.modal.cliente.id, {nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC});
+        await editarCliente(state.modal.cliente.id, {nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC, plazoCredito:plazoC});
       } else {
-        await crearCliente({nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC});
+        await crearCliente({nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC, plazoCredito:plazoC});
       }
       state.modal=null; render(); toast('Cliente guardado');
     }
@@ -3262,7 +3281,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var clienteRF = clienteCheckout();
       var cfgRF = cfgEmpresa();
       var previewEl = document.getElementById('rf-preview');
-      if(previewEl) previewEl.textContent = textoFactura('(sin asignar)', clienteRF, itemsRF, total, cfgRF, {tipo:'credito', abono:abono, medio:state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim()});
+      if(previewEl) previewEl.textContent = textoFactura('(sin asignar)', clienteRF, itemsRF, total, cfgRF, {tipo:'credito', abono:abono, medio:state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim(),
+        vence: state.editandoVenta && state.editandoVenta.fechaVencimiento ? state.editandoVenta.fechaVencimiento : fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), clienteById(state.selectedClienteId) || clienteRF)});
     }
   });
 
