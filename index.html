@@ -1816,8 +1816,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   function compartirPdf(){
     var f = state.modal && state.modal.pdf;
     if(!f){ toast('Preparando el PDF, espera un segundo…'); return; }
+    // el mensaje (saldo, vencimiento y "responde ACEPTO" en créditos) va junto con el PDF
+    var mvS = state.modal.venta, mcS = state.modal.cliente;
+    var textoS = (mvS && mcS) ? mensajeWhatsapp(mvS, mcS) : '';
     if(navigator.canShare && navigator.share && navigator.canShare({files:[f]})){
-      navigator.share({files:[f], title:f.name}).catch(function(err){
+      var datosS = textoS && navigator.canShare({files:[f], text:textoS}) ? {files:[f], text:textoS} : {files:[f], title:f.name};
+      navigator.share(datosS).catch(function(err){
         if(err && err.name!=='AbortError') descargarArchivo(f);
       });
     } else {
