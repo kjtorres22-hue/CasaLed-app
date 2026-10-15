@@ -261,3 +261,27 @@ export function leerRUT(paginas){
   r.valido = !!(r.numero && r.primerApellido && r.direccion);
   return r;
 }
+
+// ---------- Ver un PDF como imágenes (para mostrarlo dentro de la app) ----------
+export async function pdfAImagenes(datos, opciones){
+  var base = (opciones && opciones.base) || './';
+  var escala = (opciones && opciones.escala) || 2;
+  var pdfjs = await cargarPdfjs(base);
+  var documento = await pdfjs.getDocument({
+    data: datos instanceof Uint8Array ? datos : new Uint8Array(datos),
+    cMapUrl: base + 'vendor/pdfjs/cmaps/', cMapPacked: true, isEvalSupported: false
+  }).promise;
+  var imagenes = [];
+  for(var n = 1; n <= documento.numPages; n++){
+    var pagina = await documento.getPage(n);
+    var vista = pagina.getViewport({ scale: escala });
+    var lienzo = document.createElement('canvas');
+    lienzo.width = Math.ceil(vista.width); lienzo.height = Math.ceil(vista.height);
+    var ctx = lienzo.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, lienzo.width, lienzo.height);
+    await pagina.render({ canvasContext: ctx, viewport: vista }).promise;
+    imagenes.push(lienzo.toDataURL('image/jpeg', 0.9));
+  }
+  try{ documento.destroy(); }catch(e){}
+  return imagenes;
+}

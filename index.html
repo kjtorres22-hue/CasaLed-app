@@ -189,6 +189,9 @@
     margin-top:10px; color:var(--text);
   }
   .list-item{ padding:11px 0; border-bottom:1px solid var(--border); }
+  .visor-pdf{ overflow:auto; -webkit-overflow-scrolling:touch; max-height:68vh; background:#e5e7eb; border-radius:10px; padding:8px; }
+  .visor-pdf img{ display:block; width:100%; margin:0 auto 8px; box-shadow:0 2px 8px rgba(0,0,0,.18); background:#fff; }
+  .visor-pdf.zoom img{ width:230%; max-width:none; }
   .zona-pegar{ min-height:110px; border:2px dashed var(--amber); border-radius:14px; padding:16px; text-align:center;
     color:var(--muted); font-size:14px; background:var(--panel-2); outline:none; -webkit-user-select:text; user-select:text; }
   .zona-pegar:empty:before{ content:attr(data-ph); }
@@ -276,7 +279,7 @@
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
 import { generarFacturaPDF, generarSoporteDIAN, generarPedidoPDF, TITULO_DOC } from './factura-pdf.js';
-import { leerPDF, textoAPaginas, parsearFactura, leerRUT } from './compras-parser.js';
+import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -1415,6 +1418,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(state.modal===m) render();
     });
   }
+  // Muestra la cuenta de cobro en PDF dentro de la app (vendedor y administrador)
+  function verPdfVenta(venta, cliente, archivo, anterior){
+    cliente = cliente || clienteById(venta.clienteId) || {nombre:venta.clienteNombre, telefono:venta.clienteTelefono};
+    var m = { type:'ver-pdf', venta:venta, cliente:cliente, file:archivo||null, imagenes:null, error:false, zoom:false, desdeFactura:!!anterior, anterior:anterior||null };
+    state.modal = m; render();
+    (archivo ? Promise.resolve(archivo) : generarFacturaPDF(datosPdf(venta, cliente)).then(function(blob){
+      return new File([blob], 'Cuenta-de-cobro-'+venta.numero+'-CasaLED.pdf', {type:'application/pdf'});
+    })).then(function(f){
+      m.file = f; if(state.modal===m) render();
+      return f.arrayBuffer();
+    }).then(function(buf){ return pdfAImagenes(buf); })
+      .then(function(imgs){ m.imagenes = imgs; if(state.modal===m) render(); })
+      .catch(function(err){ console.error(err); m.error = true; if(state.modal===m) render(); });
+  }
   // ---------- ARCHIVO CONTABLE ----------
   var TAM_PARTE = 700000; // caracteres base64 por documento (Firestore admite hasta 1 MB)
   function bytesABase64(bytes){
@@ -2515,7 +2532,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div><span class="product-name">Factura #'+v.numero+'</span>'+(v.editadoEn?' <span class="badge" style="background:var(--amber-dim);color:var(--amber);">Editada</span>':'')+(v.tipoPago==='credito'?' <span class="badge" style="background:rgba(248,113,113,.15);color:var(--red);">Crédito'+(v.saldo>0?(' · Saldo '+fmtCOP(v.saldo)):' · Pagado')+'</span>':'')+'<div class="small muted">'+esc(v.clienteNombre)+' · '+fmtFecha(v.fecha)+'</div>'+(v.comentarios?('<div class="small" style="margin-top:2px;">💬 '+esc(v.comentarios.length>80?v.comentarios.slice(0,80)+'…':v.comentarios)+'</div>'):'')+'</div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;">'+fmtCOP(v.total)+'</span>'+
-          '<button class="btn btn-sm btn-ghost" data-action="ver-factura" data-id="'+v.id+'">Factura</button>'+
+          '<button class="btn btn-sm btn-ghost" data-action="ver-pdf" data-id="'+v.id+'">👁 Ver</button>'+
+          '<button class="btn btn-sm btn-ghost" data-action="ver-factura" data-id="'+v.id+'">Enviar</button>'+
         '</div>'+
       '</div></div>';
     }).join('') : '<div class="empty" style="padding:16px;">No hay facturas en esta ruta.</div>';
@@ -2717,6 +2735,17 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='ver-pdf'){
+      var vp = state.modal;
+      html = '<h3>Cuenta de cobro #'+esc(vp.venta.numero)+' · '+esc(vp.venta.clienteNombre||'')+'</h3>'+
+        (vp.error ? '<div class="small" style="color:var(--red);">No se pudo mostrar el PDF.</div>' :
+          (vp.imagenes ? '<div class="visor-pdf'+(vp.zoom?' zoom':'')+'" data-action="zoom-pdf">'+vp.imagenes.map(function(src, i){ return '<img src="'+src+'" alt="Página '+(i+1)+'">'; }).join('')+'</div>'+
+            '<div class="small muted" style="margin-top:6px;text-align:center;">Toca la hoja para '+(vp.zoom?'alejar':'acercar')+(vp.imagenes.length>1?(' · '+vp.imagenes.length+' páginas'):'')+'</div>'
+          : '<div class="empty" style="padding:30px;">Cargando…</div>'))+
+        '<div class="row" style="margin-top:10px;gap:8px;">'+
+          '<button class="btn btn-primary" style="flex:1" data-action="compartir-pdf-visor" '+(vp.file?'':'disabled')+'>Compartir</button>'+
+          (vp.desdeFactura ? '<button class="btn btn-ghost" style="flex:1" data-action="volver-factura">Volver</button>' : '<button class="btn btn-ghost" style="flex:1" data-action="cerrar-modal">Cerrar</button>')+
+        '</div>';
     } else if(state.modal.type==='cobros'){
       var listaC = cobrosPendientes();
       var hoyC = fechaLocalISO(new Date().toISOString());
@@ -2906,6 +2935,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<button class="btn btn-primary btn-block" style="margin-top:10px;padding:13px;" data-action="compartir-pdf" '+(state.modal.pdf?'':'disabled')+'>'+
           (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
         '</button>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="ver-pdf-modal" '+(state.modal.pdf?'':'disabled')+'>👁 Ver cuenta de cobro</button>'+
         '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
         (state.isAdmin && mv.id ? (
           '<div class="row" style="margin-top:12px;gap:8px;">'+
@@ -3285,6 +3315,24 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(prox <= maxNum && !confirm('Ya existe la factura #'+maxNum+'. Si sigues, se pueden repetir números. ¿Continuar?')) return;
       await guardarEmpresa({contadorFactura: prox - 1});
       toast('La próxima factura será la N.° '+prox);
+    }
+    else if(action==='ver-pdf'){
+      var vv = state.ventas.find(function(v){ return v.id===id; });
+      if(vv) verPdfVenta(vv, null, null);
+    }
+    else if(action==='ver-pdf-modal'){
+      var mF = state.modal; if(!mF || !mF.pdf) return;
+      verPdfVenta(mF.venta, mF.cliente, mF.pdf, mF);
+    }
+    else if(action==='volver-factura'){ if(state.modal && state.modal.anterior){ state.modal = state.modal.anterior; render(); } }
+    else if(action==='zoom-pdf'){ if(state.modal){ state.modal.zoom = !state.modal.zoom; render(); } }
+    else if(action==='compartir-pdf-visor'){
+      var mV = state.modal; if(!mV || !mV.file) return;
+      var txtV = mensajeWhatsapp(mV.venta, mV.cliente);
+      if(navigator.canShare && navigator.share && navigator.canShare({files:[mV.file]})){
+        navigator.share(navigator.canShare({files:[mV.file], text:txtV}) ? {files:[mV.file], text:txtV} : {files:[mV.file], title:mV.file.name})
+          .catch(function(err){ if(err && err.name!=='AbortError') descargarArchivo(mV.file); });
+      } else descargarArchivo(mV.file);
     }
     else if(action==='ver-factura'){
       var vf = state.ventas.find(function(v){ return v.id===id; });
