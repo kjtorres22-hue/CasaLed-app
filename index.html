@@ -145,6 +145,9 @@
   }
   .qty-btn:active{ background:var(--amber-dim); border-color:var(--amber); }
   .qty-val{ min-width:30px; text-align:center; font-size:17px; font-weight:700; font-variant-numeric:tabular-nums; }
+  input.qty-input{ width:58px; min-width:0; height:44px; padding:0 4px; border-radius:10px; border:1px solid var(--border);
+    background:var(--panel); color:var(--text); font-size:17px; }
+  input.qty-input:focus{ border-color:var(--amber); outline:none; }
   .cart-bar{
     position:fixed; left:0; right:0; bottom:64px; z-index:15;
     display:flex; justify-content:center; padding:0 14px;
@@ -2067,7 +2070,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
             '<span class="small">'+esc(color)+' <span class="muted">(stock '+stockColor+')</span></span>'+
             '<div class="qty-control">'+
               '<button class="qty-btn" data-action="cart-dec" data-id="'+key+'">–</button>'+
-              '<span class="qty-val">'+enCarrito+'</span>'+
+              '<input class="qty-val qty-input" id="qty-'+esc(key)+'" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-id="'+esc(key)+'" value="'+enCarrito+'">'+
               '<button class="qty-btn" data-action="cart-inc" data-id="'+key+'" '+(disponible<=0?'disabled style="opacity:.35"':'')+'>+</button>'+
             '</div>'+
           '</div>';
@@ -2077,7 +2080,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       return '<div class="product-row">'+header+
         '<div class="qty-control">'+
           '<button class="qty-btn" data-action="cart-dec" data-id="'+p.id+'">–</button>'+
-          '<span class="qty-val">'+enCarritoTotal+'</span>'+
+          '<input class="qty-val qty-input" id="qty-'+esc(p.id)+'" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-id="'+esc(p.id)+'" value="'+enCarritoTotal+'">'+
           '<button class="qty-btn" data-action="cart-inc" data-id="'+p.id+'" '+(dispTotal<=0?'disabled style="opacity:.35"':'')+'>+</button>'+
         '</div>'+
       '</div>';
@@ -3490,6 +3493,23 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   });
 
   document.addEventListener('change', async function(e){
+    // cantidad escrita a mano en el recuadro entre − y +
+    if(e.target.classList && e.target.classList.contains('qty-input')){
+      var kQ = e.target.getAttribute('data-id');
+      var partesQ = kQ.split('|'), pQ = productoById(partesQ[0]), colorQ = partesQ[1];
+      if(!pQ) return;
+      var nQ = Math.max(0, Math.floor(Number(String(e.target.value).replace(/[^0-9]/g,''))||0));
+      var actualQ = state.cart[kQ]||0, maxQ;
+      if(colorQ && pQ.colores && pQ.colores.length){
+        maxQ = ((pQ.stockPorColor && Number(pQ.stockPorColor[colorQ])) || 0) + cantidadOriginal(pQ.id, colorQ);
+      } else {
+        maxQ = (Number(pQ.stock)||0) + cantidadOriginal(pQ.id) - (cartTotalForProducto(pQ.id) - actualQ);
+      }
+      if(nQ > maxQ){ nQ = Math.max(0, maxQ); toast('Solo hay '+nQ+' disponible(s)'+(colorQ?(' en '+colorQ):'')); }
+      if(nQ > 0) state.cart[kQ] = nQ; else delete state.cart[kQ];
+      render();
+      return;
+    }
     if(state.modal && state.modal.type==='revisar-compra'){
       var liC = e.target.getAttribute && e.target.getAttribute('data-li');
       if(liC != null){
@@ -3587,6 +3607,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       db.doc('usuarios/'+uidRol).update({rol:e.target.value});
       toast('Rol actualizado');
     }
+  });
+
+  document.addEventListener('focusin', function(e){
+    if(e.target.classList && e.target.classList.contains('qty-input')){ setTimeout(function(){ try{ e.target.select(); }catch(x){} }, 0); }
+  });
+  document.addEventListener('keydown', function(e){
+    if(e.key==='Enter' && e.target.classList && e.target.classList.contains('qty-input')) e.target.blur();
   });
 
   // Al tocar "Recordar" se abre WhatsApp y queda anotado el día del recordatorio
