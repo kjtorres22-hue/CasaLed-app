@@ -330,7 +330,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -2342,7 +2342,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">Factura #'+v.numero+' · '+fmtFecha(v.fecha)+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;color:var(--red);">'+fmtCOP(v.saldo)+'</span>'+
-          '<button class="btn btn-sm btn-ghost" data-action="marcar-pagado" data-id="'+v.id+'">Marcar pagado</button>'+
+          (state.isAdmin ? '<button class="btn btn-sm btn-ghost" data-action="marcar-pagado" data-id="'+v.id+'">Marcar pagado</button>' : '')+
         '</div>'+
       '</div></div>';
     }).join('') : '<div class="empty" style="padding:16px;">Nadie debe en esta ruta.</div>';
