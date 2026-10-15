@@ -984,7 +984,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   async function crearCliente(data){
     var doc = {
       nombre:data.nombre, telefono:data.telefono||'', direccion:data.direccion||'', rutaId:data.rutaId||null,
-      documento:data.documento||'', ciudad:data.ciudad||'', plazoCredito:Number(data.plazoCredito)||8, creadoEn:todayISO()
+      documento:data.documento||'', ciudad:data.ciudad||'', creadoEn:todayISO()
     };
     var ref = await db.collection('clientes').add(doc);
     return Object.assign({id:ref.id}, doc);
@@ -1072,7 +1072,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         rutaId:(jornadaVenta?jornadaVenta.rutaId:(cliente.rutaId||null)), rutaNombre:(jornadaVenta?jornadaVenta.rutaNombre:(ruta?ruta.nombre:'')),
         jornadaId:jornadaVenta?jornadaVenta.id:null, items:items, total:total,
         tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago:medioPago, fecha:fecha,
-        fechaVencimiento: tipoPago==='credito' ? fechaVencimiento(fecha, cliente) : null,
+        plazoCredito: tipoPago==='credito' ? (state.checkoutPlazo || 8) : null,
+        fechaVencimiento: tipoPago==='credito' ? fechaVencimiento(fecha, state.checkoutPlazo || 8) : null,
         comentarios:(state.checkoutComentarios||'').trim(),
         vendedorId:state.auth.user.uid, vendedorNombre:nombreUsuario()
       };
@@ -1110,6 +1111,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.checkoutPago = 'contado';
       state.checkoutAbono = 0;
       state.checkoutMedio = 'efectivo';
+      state.checkoutPlazo = 8;
       state.checkoutComentarios = '';
       abrirFactura(Object.assign({id:ventaRef.id}, ventaDoc), cliente, true);
     }catch(e){
@@ -1171,7 +1173,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
       rutaId:cliente.rutaId||orig.rutaId||null, rutaNombre:ruta?ruta.nombre:(orig.rutaNombre||''),
       items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago: abono > 0 ? (state.checkoutMedio || 'efectivo') : null,
-      fechaVencimiento: tipoPago==='credito' ? (orig.fechaVencimiento || fechaVencimiento(orig.fecha, clienteById(cliente.id) || cliente)) : null,
+      plazoCredito: tipoPago==='credito' ? (state.checkoutPlazo || 8) : null,
+      fechaVencimiento: tipoPago==='credito' ? fechaVencimiento(orig.fecha, state.checkoutPlazo || 8) : null,
       comentarios:(state.checkoutComentarios||'').trim(),
       editadoEn:fecha, editadoPor:nombreUsuario()
     };
@@ -1180,7 +1183,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var actualizada = Object.assign({}, orig, cambios);
     state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
-    state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutMedio = 'efectivo'; state.checkoutComentarios = '';
+    state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutMedio = 'efectivo'; state.checkoutPlazo = 8; state.checkoutComentarios = '';
     abrirFactura(actualizada, cliente, false);
     state.modal.editada = true; render();
     toast('Factura #'+orig.numero+' actualizada');
@@ -1315,14 +1318,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     return lineas.join('\n');
   }
   // Vencimiento de un crédito: fecha de la cuenta de cobro + plazo del cliente (8 días, o 15 para algunos)
-  function fechaVencimiento(fechaISO, cliente){
-    var dias = (cliente && Number(cliente.plazoCredito)) || 8;
+  function fechaVencimiento(fechaISO, plazo){
+    var dias = Number(plazo) || 8;
     var d = new Date(fechaISO || Date.now()); d.setDate(d.getDate() + dias);
     return d.toISOString();
   }
   function vencimientoDe(v){
     if(v.tipoPago!=='credito') return null;
-    return v.fechaVencimiento || fechaVencimiento(v.fecha, clienteById(v.clienteId));
+    return v.fechaVencimiento || fechaVencimiento(v.fecha, v.plazoCredito || 8);
   }
   // ---------- COBROS: créditos que llegaron a la fecha máxima de pago sin pagar ----------
   function cobrosPendientes(){
@@ -2622,7 +2625,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var clienteRF = clienteCheckout();
       var cfgRF = cfgEmpresa();
       var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF, medio: state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim(),
-        vence: state.checkoutPago==='credito' ? (state.editandoVenta && state.editandoVenta.fechaVencimiento ? state.editandoVenta.fechaVencimiento : fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), clienteById(state.selectedClienteId) || clienteRF)) : null};
+        vence: state.checkoutPago==='credito' ? fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), state.checkoutPlazo || 8) : null};
       var saldoRF = Math.max(0, totalRF - (pagoRF.abono||0));
       var previewTexto = textoFactura('(sin asignar)', clienteRF, itemsRF, totalRF, cfgRF, pagoRF);
       var nc = state.modal.nc || {};
@@ -2664,6 +2667,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="chip'+(state.checkoutPago==='credito'?' active':'')+'" data-action="set-tipo-pago" data-tipo="credito">Crédito</button>'+
         '</div>'+
         (state.checkoutPago==='credito' ?
+          '<label>Plazo del crédito</label>'+
+          '<div class="chips" style="margin-bottom:6px;">'+
+            [8,15].map(function(d){ return '<button class="chip'+((state.checkoutPlazo||8)===d?' active':'')+'" data-action="set-plazo" data-dias="'+d+'">'+d+' días</button>'; }).join('')+
+          '</div>'+
+          '<div class="small" style="margin-bottom:10px;">Vence el <strong>'+esc(new Date(fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), state.checkoutPlazo || 8)).toLocaleDateString('es-CO'))+'</strong></div>'+
           '<div class="field"><label>Abono (pago inicial)</label><input id="rf-abono" type="number" min="0" max="'+totalRF+'" value="'+(state.checkoutAbono||0)+'" data-total="'+totalRF+'"></div>'+
           '<div class="small muted" style="margin-bottom:10px;">Saldo pendiente: <strong id="rf-saldo">'+fmtCOP(saldoRF)+'</strong></div>'
           : '<div class="small muted" style="margin-bottom:10px;">Se registra como pagada de contado.</div>')+
@@ -2984,9 +2992,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="field"><label>NIT / CC (opcional)</label><input id="mc-documento" inputmode="numeric" value="'+esc(c.documento||'')+'"></div>'+
           '<div class="field"><label>Ciudad (opcional)</label><input id="mc-ciudad" value="'+esc(c.ciudad||'')+'"></div>'+
         '</div>'+
-        '<div class="field"><label>Plazo de crédito</label><select id="mc-plazo">'+
-          [8,15].map(function(d){ return '<option value="'+d+'"'+((Number(c.plazoCredito)||8)===d?' selected':'')+'>'+d+' días</option>'; }).join('')+
-        '</select></div>'+
         '<div class="field"><label>Ruta</label><select id="mc-ruta">'+
           '<option value="">Sin ruta</option>'+
           state.rutas.map(function(r){return '<option value="'+r.id+'"'+(c.rutaId===r.id?' selected':'')+'>'+esc(r.nombre)+'</option>';}).join('')+
@@ -3247,6 +3252,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.checkoutAbono = ve.tipoPago==='credito' ? (Number(ve.abono)||0) : 0;
       state.checkoutComentarios = ve.comentarios || '';
       state.checkoutMedio = ve.medioPago || 'efectivo';
+      state.checkoutPlazo = ve.plazoCredito || (ve.fechaVencimiento ? (Math.round((new Date(ve.fechaVencimiento) - new Date(ve.fecha)) / 864e5) >= 12 ? 15 : 8) : 8);
       state.modal = null; state.activeTab = 'vender';
       render(); window.scrollTo(0,0);
       toast('Editando factura #'+ve.numero);
@@ -3281,6 +3287,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var vf = state.ventas.find(function(v){ return v.id===id; });
       if(vf) abrirFactura(vf, null, false);
     }
+    else if(action==='set-plazo'){ state.checkoutPlazo = Number(t.getAttribute('data-dias')) || 8; render({preservar:true}); }
     else if(action==='set-medio-pago'){ state.checkoutMedio = t.getAttribute('data-medio'); render({preservar:true}); }
     else if(action==='set-tipo-pago'){
       state.checkoutPago = t.getAttribute('data-tipo');
@@ -3409,12 +3416,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var rutaC = document.getElementById('mc-ruta').value;
       var docC = document.getElementById('mc-documento').value.trim();
       var ciuC = document.getElementById('mc-ciudad').value.trim();
-      var plazoC = Number(document.getElementById('mc-plazo').value)||8;
       if(!nombreC){ toast('El nombre es obligatorio'); return; }
       if(state.modal.type==='editar-cliente'){
-        await editarCliente(state.modal.cliente.id, {nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC, plazoCredito:plazoC});
+        await editarCliente(state.modal.cliente.id, {nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC});
       } else {
-        await crearCliente({nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC, plazoCredito:plazoC});
+        await crearCliente({nombre:nombreC, telefono:telC, direccion:dirC, rutaId:rutaC||null, documento:docC, ciudad:ciuC});
       }
       state.modal=null; render(); toast('Cliente guardado');
     }
@@ -3479,7 +3485,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var cfgRF = cfgEmpresa();
       var previewEl = document.getElementById('rf-preview');
       if(previewEl) previewEl.textContent = textoFactura('(sin asignar)', clienteRF, itemsRF, total, cfgRF, {tipo:'credito', abono:abono, medio:state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim(),
-        vence: state.editandoVenta && state.editandoVenta.fechaVencimiento ? state.editandoVenta.fechaVencimiento : fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), clienteById(state.selectedClienteId) || clienteRF)});
+        vence: fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), state.checkoutPlazo || 8)});
     }
   });
 
