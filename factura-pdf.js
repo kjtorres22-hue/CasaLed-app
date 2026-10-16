@@ -327,20 +327,25 @@ export async function generarFacturaPDF(datos){
   pdf.stroke(LINEA); pdf.line(xT, yT, xT + wT, yT);
   filaTot('TOTAL', cop(v.total), yT + 2, { fondo: NEGRO, color: BLANCO, size: 12, h: 28 }); yT += 32;
   if(credito){
-    filaTot('ABONO' + ((Number(v.abono) || 0) > 0 && v.medioPago ? ' · ' + (v.medioPago === 'transferencia' ? 'TRANSF.' : 'EFECTIVO') : ''), cop(v.abono), yT); yT += 20;
+    filaTot('ABONO' + ((Number(v.abono) || 0) > 0 && v.medioPago ? ' · ' + (v.medioPago === 'transferencia' ? 'TRANSF.' : (v.medioPago === 'mixto' ? 'EFECT.+TRANSF.' : 'EFECTIVO')) : ''), cop(v.abono), yT); yT += 20;
     filaTot('SALDO PENDIENTE', cop(v.saldo), yT, { fondo: [253, 236, 236], color: ROJO, h: 24 }); yT += 26;
   }
 
   // Caja izquierda: forma de pago y resumen
   const wL = ANCHO - wT - 14;
-  pdf.stroke(LINEA); pdf.lineWidth(0.8); pdf.rect(M, y, wL, yT - y, 'S');
+  const lineasL = [];
+  if(credito && v.fechaVencimiento) lineasL.push(['Vence el ' + fechaCorta(v.fechaVencimiento), { size: 10, bold: true, color: ROJO }]);
+  if(v.medioPago === 'mixto') lineasL.push(['Efectivo ' + cop(v.montoEfectivo) + ' · Transferencia ' + cop(v.montoTransferencia), { size: 9.5, bold: true, color: NEGRO }]);
+  lineasL.push([items.length + ' referencia(s) · ' + unidades + ' unidad(es)', { size: 9, color: GRIS }]);
+  const yL = y + 50 + (lineasL.length - 1) * 15;
+  const altoL = Math.max(yT, yL + 10) - y;
+  pdf.stroke(LINEA); pdf.lineWidth(0.8); pdf.rect(M, y, wL, altoL, 'S');
   pdf.text('FORMA DE PAGO', M + 10, y + 16, { size: 8, bold: true, color: GRIS });
-  const medioTxt = v.medioPago === 'transferencia' ? 'TRANSFERENCIA' : (v.medioPago === 'efectivo' ? 'EFECTIVO' : '');
+  const medioTxt = v.medioPago === 'transferencia' ? 'TRANSFERENCIA' : (v.medioPago === 'efectivo' ? 'EFECTIVO' : (v.medioPago === 'mixto' ? 'EFECTIVO + TRANSF.' : ''));
   pdf.text(credito ? 'CRÉDITO' : ('CONTADO' + (medioTxt ? ' · ' + medioTxt : ' · PAGADO')), M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
-  if(credito && v.fechaVencimiento) pdf.text('Vence el ' + fechaCorta(v.fechaVencimiento), M + 10, y + 50, { size: 10, bold: true, color: ROJO });
-  pdf.text(items.length + ' referencia(s) · ' + unidades + ' unidad(es)', M + 10, y + (credito && v.fechaVencimiento ? 66 : 50), { size: 9, color: GRIS });
+  lineasL.forEach((l, k) => pdf.text(l[0], M + 10, y + 50 + k * 15, l[1]));
 
-  let yN = Math.max(yT, y + 60) + 10;
+  let yN = Math.max(yT, y + 60, yL + 8) + 10;
 
   // Compromiso de pago (créditos con saldo)
   if(credito && v.fechaVencimiento && (Number(v.saldo) || 0) > 0){
@@ -439,7 +444,8 @@ export async function generarSoporteDIAN(datos){
   };
 
   const credito = v.tipoPago === 'credito';
-  const medio = v.medioPago === 'transferencia' ? 'Transferencia' : (v.medioPago === 'efectivo' ? 'Efectivo' : '');
+  const medio = v.medioPago === 'transferencia' ? 'Transferencia' : (v.medioPago === 'efectivo' ? 'Efectivo' :
+    (v.medioPago === 'mixto' ? ('Efectivo ' + cop(v.montoEfectivo) + ' y transferencia ' + cop(v.montoTransferencia)) : ''));
   const fecha = new Date(v.fecha || Date.now());
   const fechaTxt = fecha.toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' });
   const horaTxt = fecha.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });

@@ -610,6 +610,38 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(!j || esRutaDespachos(j.rutaId)) return state.clientes.slice();
     return state.clientes.filter(function(c){ return c.rutaId===j.rutaId || c.id===state.selectedClienteId; });
   }
+  // ---------- MUNICIPIOS (campo "ciudad" del cliente) ----------
+  function claveMunicipio(c){ return String((c && c.ciudad) || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+  function nombreMunicipio(c){
+    var t = String((c && c.ciudad) || '').trim();
+    return t ? t.toLowerCase().replace(/(^|\s)([a-záéíóúñ])/g, function(x, a, b){ return a + b.toUpperCase(); }) : '';
+  }
+  // Agrupa clientes por municipio, municipios en orden alfabético y clientes también; "Sin municipio" al final
+  function gruposPorMunicipio(lista){
+    var g = {};
+    lista.forEach(function(c){ var k = claveMunicipio(c); if(!g[k]) g[k] = { nombre: nombreMunicipio(c) || 'Sin municipio', clientes: [] }; g[k].clientes.push(c); });
+    return Object.keys(g).sort(function(a, b){ if(!a) return 1; if(!b) return -1; return a.localeCompare(b, 'es'); }).map(function(k){
+      g[k].clientes.sort(function(x, y){ return String(x.nombre).localeCompare(String(y.nombre), 'es', {sensitivity:'base'}); });
+      g[k].clave = k; return g[k];
+    });
+  }
+  function selectorMunicipio(lista, id){
+    var grupos = gruposPorMunicipio(lista);
+    if(grupos.length < 2) return '';
+    return '<div class="chips" style="margin-bottom:8px;flex-wrap:wrap;">'+
+      '<button class="chip'+(!state.filtroMunicipio?' active':'')+'" data-action="filtro-municipio" data-m="">Todos</button>'+
+      grupos.map(function(gq){ return '<button class="chip'+(state.filtroMunicipio===gq.clave && gq.clave?' active':'')+'" data-action="filtro-municipio" data-m="'+esc(gq.clave||'__sin__')+'">'+esc(gq.nombre)+' <span class="muted">('+gq.clientes.length+')</span></button>'; }).join('')+
+    '</div>';
+  }
+  function opcionesClientesPorMunicipio(lista, seleccionado, extra){
+    var f = state.filtroMunicipio;
+    var filtrada = !f ? lista : lista.filter(function(c){ return (f==='__sin__' ? !claveMunicipio(c) : claveMunicipio(c)===f) || c.id===seleccionado; });
+    return gruposPorMunicipio(filtrada).map(function(gq){
+      return '<optgroup label="'+esc(gq.nombre)+'">'+gq.clientes.map(function(c){
+        return '<option value="'+c.id+'"'+(seleccionado===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+(extra?extra(c):'')+'</option>';
+      }).join('')+'</optgroup>';
+    }).join('');
+  }
   function miJornada(){
     var uid = state.auth.user && state.auth.user.uid;
     return state.jornadas.find(function(j){ return j.estado==='abierta' && j.iniciadaPor===uid; }) || null;
@@ -638,10 +670,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         r.credito += t; r.abonos += Number(v.abono)||0; r.saldoPendiente += Number(v.saldo)||0;
         if((Number(v.saldo)||0) > 0) r.deudores.push({cliente:v.clienteNombre||'', numero:v.numero, saldo:Number(v.saldo)||0, total:t});
       } else { r.contado += t; }
-      var recibidoV = v.tipoPago==='credito' ? (Number(v.abono)||0) : t;
-      if(v.medioPago==='transferencia') r.transferencia += recibidoV;
-      else if(v.medioPago==='efectivo') r.efectivo += recibidoV;
-      else r.sinMedio += recibidoV;
+      var rm = recibidoPorMedio(v);
+      r.efectivo += rm.efectivo; r.transferencia += rm.transferencia; r.sinMedio += rm.sinMedio;
       (v.items||[]).forEach(function(it){
         var k = it.nombre;
         if(!porProd[k]) porProd[k] = {nombre:it.nombre, cantidad:0, total:0};
@@ -1070,7 +1100,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var tipoPago = state.checkoutPago || 'contado';
     var abono = tipoPago==='credito' ? Math.max(0, Math.min(total, Number(state.checkoutAbono)||0)) : total;
     var saldo = Math.max(0, total - abono);
-    var medioPago = abono > 0 ? (state.checkoutMedio || 'efectivo') : null;
+    var pagoM = montosPago(abono);
+    var medioPago = pagoM.medioPago;
+    var partesComp = null;
+    if(state.checkoutComprobante && (medioPago==='transferencia' || medioPago==='mixto')){
+      try{ partesComp = await partesComprobante(state.checkoutComprobante); }
+      catch(eC){ toast(eC && eC.code==='archivo-grande' ? 'La foto del comprobante es muy grande; la venta se guarda sin ella.' : 'No se pudo leer la foto del comprobante; la venta se guarda sin ella.'); }
+    }
 
     try{
       var reserva = await siguienteNumeroFactura();
@@ -1087,12 +1123,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         rutaId:(jornadaVenta?jornadaVenta.rutaId:(cliente.rutaId||null)), rutaNombre:(jornadaVenta?jornadaVenta.rutaNombre:(ruta?ruta.nombre:'')),
         jornadaId:jornadaVenta?jornadaVenta.id:null, items:items, total:total,
         tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago:medioPago, fecha:fecha,
+        montoEfectivo:pagoM.montoEfectivo, montoTransferencia:pagoM.montoTransferencia,
+        comprobantePartes: partesComp ? partesComp.length : 0,
         plazoCredito: tipoPago==='credito' ? (state.checkoutPlazo || 8) : null,
         fechaVencimiento: tipoPago==='credito' ? fechaVencimiento(fecha, state.checkoutPlazo || 8) : null,
         comentarios:(state.checkoutComentarios||'').trim(),
         vendedorId:state.auth.user.uid, vendedorNombre:nombreUsuario()
       };
       b.set(ventaRef, ventaDoc);
+      (partesComp||[]).forEach(function(d, i){ b.set(doc(fs, 'comprobantes/'+ventaRef.id+'_'+i), { ventaId:ventaRef.id, parte:i, data:d, creadoPor:state.auth.user.uid }); });
       // un solo update por producto, sumando todos los colores del pedido
       var porProducto = {};
       items.forEach(function(it){
@@ -1126,6 +1165,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.checkoutPago = 'contado';
       state.checkoutAbono = 0;
       state.checkoutMedio = 'efectivo';
+      state.checkoutTransf = 0; state.checkoutComprobante = null;
       state.checkoutPlazo = 8;
       state.checkoutComentarios = '';
       abrirFactura(Object.assign({id:ventaRef.id}, ventaDoc), cliente, true);
@@ -1184,21 +1224,30 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       });
     });
     var ruta = rutaById(cliente.rutaId);
+    var pagoE = montosPago(abono);
+    var partesCompE = null;
+    if(state.checkoutComprobante && (pagoE.medioPago==='transferencia' || pagoE.medioPago==='mixto')){
+      try{ partesCompE = await partesComprobante(state.checkoutComprobante); }
+      catch(eC2){ toast('No se pudo guardar la foto del comprobante.'); }
+    }
+    (partesCompE||[]).forEach(function(d, i){ b.set(doc(fs, 'comprobantes/'+orig.id+'_'+i), { ventaId:orig.id, parte:i, data:d, creadoPor:state.auth.user.uid }); });
     var cambios = {
       clienteId:cliente.id, clienteNombre:cliente.nombre, clienteTelefono:cliente.telefono||'',
       rutaId:cliente.rutaId||orig.rutaId||null, rutaNombre:ruta?ruta.nombre:(orig.rutaNombre||''),
-      items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago: abono > 0 ? (state.checkoutMedio || 'efectivo') : null,
+      items:items, total:total, tipoPago:tipoPago, abono:abono, saldo:saldo, medioPago: pagoE.medioPago,
+      montoEfectivo:pagoE.montoEfectivo, montoTransferencia:pagoE.montoTransferencia,
       plazoCredito: tipoPago==='credito' ? (state.checkoutPlazo || 8) : null,
       fechaVencimiento: tipoPago==='credito' ? fechaVencimiento(orig.fecha, state.checkoutPlazo || 8) : null,
       comentarios:(state.checkoutComentarios||'').trim(),
       editadoEn:fecha, editadoPor:nombreUsuario()
     };
+    if(partesCompE) cambios.comprobantePartes = partesCompE.length;
     b.update(doc(fs, 'ventas/'+orig.id), cambios);
     enSegundoPlano(b.commit());
 
     var actualizada = Object.assign({}, orig, cambios);
     state.editandoVenta = null; state.cart = {}; state.selectedClienteId = null;
-    state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutMedio = 'efectivo'; state.checkoutPlazo = 8; state.checkoutComentarios = '';
+    state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutMedio = 'efectivo'; state.checkoutTransf = 0; state.checkoutComprobante = null; state.checkoutPlazo = 8; state.checkoutComentarios = '';
     abrirFactura(actualizada, cliente, false);
     state.modal.editada = true; render();
     toast('Factura #'+orig.numero+' actualizada');
@@ -1311,7 +1360,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(pago){
       if(pago.tipo==='credito'){
         lineas.push('Forma de pago: *CRÉDITO*');
-        lineas.push('Abono: '+fmtCOP(pago.abono||0)+((pago.abono>0 && pago.medio)?(' ('+nombreMedio(pago.medio)+')'):''));
+        lineas.push('Abono: '+fmtCOP(pago.abono||0)+((pago.abono>0 && pago.medio)?(' ('+textoMedio(pago)+')'):''));
         lineas.push('*Saldo pendiente: '+fmtCOP(Math.max(0,total-(pago.abono||0)))+'*');
         if(pago.vence) lineas.push('*Vence: '+new Date(pago.vence).toLocaleDateString('es-CO')+'*');
         var saldoTF = Math.max(0,total-(pago.abono||0));
@@ -1321,7 +1370,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           lineas.push('👉 Por favor responde *ACEPTO* para confirmar que recibiste la mercancía y que pagarás en esa fecha.');
         }
       } else {
-        lineas.push('Forma de pago: *CONTADO* ✅ Pagado'+(pago.medio?(' en '+nombreMedio(pago.medio).toLowerCase()):''));
+        lineas.push('Forma de pago: *CONTADO* ✅ Pagado'+(pago.medio?(' en '+textoMedio(pago).toLowerCase()):''));
       }
     }
     if(pago && pago.comentarios){
@@ -1377,7 +1426,45 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }catch(e){}
   }
   document.addEventListener('visibilitychange', function(){ if(!document.hidden && state.ventas.length) avisarCobros(false); });
-  function nombreMedio(m){ return m==='transferencia' ? 'Transferencia' : (m==='efectivo' ? 'Efectivo' : ''); }
+  function textoMedio(pago){
+    if(pago.medio==='mixto') return 'Efectivo '+fmtCOP(pago.montoEfectivo||0)+' y transferencia '+fmtCOP(pago.montoTransferencia||0);
+    return nombreMedio(pago.medio);
+  }
+  function nombreMedio(m){ return m==='transferencia' ? 'Transferencia' : (m==='efectivo' ? 'Efectivo' : (m==='mixto' ? 'Efectivo y transferencia' : '')); }
+  // Reparte lo pagado entre efectivo y transferencia según lo elegido al facturar
+  function montosPago(pagado){
+    var medio = pagado > 0 ? (state.checkoutMedio || 'efectivo') : null;
+    var transf = 0;
+    if(medio==='transferencia') transf = pagado;
+    else if(medio==='mixto') transf = Math.max(0, Math.min(pagado, Number(state.checkoutTransf)||0));
+    return { medioPago:medio, montoEfectivo: medio ? pagado - transf : 0, montoTransferencia: medio ? transf : 0 };
+  }
+  // Lo recibido de una venta, separado (las ventas viejas solo tienen el medio)
+  function recibidoPorMedio(v){
+    var rec = v.tipoPago==='credito' ? (Number(v.abono)||0) : (Number(v.total)||0);
+    if(v.montoEfectivo!=null || v.montoTransferencia!=null) return { efectivo:Number(v.montoEfectivo)||0, transferencia:Number(v.montoTransferencia)||0, sinMedio:0 };
+    if(v.medioPago==='transferencia') return { efectivo:0, transferencia:rec, sinMedio:0 };
+    if(v.medioPago==='efectivo') return { efectivo:rec, transferencia:0, sinMedio:0 };
+    return { efectivo:0, transferencia:0, sinMedio:rec };
+  }
+  // Foto del comprobante: se reduce y se guarda en partes (igual que los archivos de compras)
+  async function partesComprobante(file){
+    var dataUrl = await reducirImagen(file, 1400, 0.8);
+    var b64 = dataUrl.split(',')[1];
+    var n = Math.ceil(b64.length / TAM_PARTE);
+    if(n > 3) throw {code:'archivo-grande'};
+    var partes = []; for(var i = 0; i < n; i++) partes.push(b64.slice(i*TAM_PARTE, (i+1)*TAM_PARTE));
+    return partes;
+  }
+  async function leerComprobante(v){
+    var trozos = [];
+    for(var i = 0; i < (v.comprobantePartes||0); i++){
+      var ds = await getDoc(doc(fs, 'comprobantes/'+v.id+'_'+i));
+      if(!ds.exists()) throw {code:'archivo-incompleto'};
+      trozos.push(ds.data().data);
+    }
+    return 'data:image/jpeg;base64,'+trozos.join('');
+  }
   function urlWhatsapp(telefono, texto){
     var tel = (telefono||'').replace(/[^0-9]/g,'');
     return 'https://wa.me/' + (tel?('57'+tel.replace(/^57/,'')): '') + '?text=' + encodeURIComponent(texto);
@@ -1797,14 +1884,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   async function paqueteVentasMes(ym){
     var ventas = state.ventas.filter(function(v){ return mesDe(fechaLocalISO(v.fecha))===ym; }).sort(function(a,b){ return (a.numero||0)-(b.numero||0); });
     var archivos = [];
-    var filas = [['Cuenta de cobro N.°','Fecha','Cliente','NIT/CC','Teléfono','Ruta','Vendedor','Forma de pago','Vence','Medio de pago','Total','Abono','Saldo','Comentarios']];
+    var filas = [['Cuenta de cobro N.°','Fecha','Cliente','NIT/CC','Teléfono','Ruta','Vendedor','Forma de pago','Vence','Medio de pago','Efectivo','Transferencia','Total','Abono','Saldo','Comentarios']];
     for(var i = 0; i < ventas.length; i++){
       var v = ventas[i];
       var cli = clienteById(v.clienteId) || {nombre:v.clienteNombre, telefono:v.clienteTelefono};
       var blob = await generarFacturaPDF(datosPdf(v, cli));
       archivos.push({ nombre:'Cuenta-de-cobro-'+v.numero+'.pdf', bytes:new Uint8Array(await blob.arrayBuffer()) });
       filas.push([v.numero, fechaLocalISO(v.fecha), v.clienteNombre||'', cli.documento||'', v.clienteTelefono||'', v.rutaNombre||'', v.vendedorNombre||'',
-        v.tipoPago==='credito'?'Crédito':'Contado', vencimientoDe(v) ? fechaLocalISO(vencimientoDe(v)) : '', nombreMedio(v.medioPago), v.total||0, v.abono||0, v.saldo||0, v.comentarios||'']);
+        v.tipoPago==='credito'?'Crédito':'Contado', vencimientoDe(v) ? fechaLocalISO(vencimientoDe(v)) : '', nombreMedio(v.medioPago), recibidoPorMedio(v).efectivo, recibidoPorMedio(v).transferencia, v.total||0, v.abono||0, v.saldo||0, v.comentarios||'']);
     }
     archivos.push({ nombre:'Resumen-ventas-'+ym+'.csv', bytes:csvBytes(filas) });
     return { file:new File([crearZip(archivos)], 'CasaLED-ventas-'+ym+'.zip', {type:'application/zip'}), cantidad:ventas.length };
@@ -1868,7 +1955,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   function reenviarFactura(venta){
     var cliente = clienteById(venta.clienteId) || {nombre:venta.clienteNombre, telefono:venta.clienteTelefono, direccion:''};
     var cfg = state.config || {empresaNombre:'Casa LED'};
-    var pago = {tipo:venta.tipoPago||'contado', abono:venta.abono, medio:venta.medioPago, vence:vencimientoDe(venta)};
+    var pago = {tipo:venta.tipoPago||'contado', abono:venta.abono, medio:venta.medioPago, montoEfectivo:venta.montoEfectivo, montoTransferencia:venta.montoTransferencia, vence:vencimientoDe(venta)};
     enviarFacturaWhatsapp(venta.numero, cliente, venta.items, venta.total, cfg, pago);
   }
 
@@ -2074,9 +2161,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var clienteSel = clienteById(state.selectedClienteId);
     var clienteHtml = '<div class="card">'+
       '<label>Cliente (opcional, también lo puedes elegir o crear al final)</label>'+
+      selectorMunicipio(clientesRuta)+
       '<select id="sel-cliente">'+
         '<option value="">Selecciona un cliente…</option>'+
-        clientesRuta.map(optCli).join('')+
+        opcionesClientesPorMunicipio(clientesRuta, state.selectedClienteId)+
       '</select>'+
       (jornada && !clientesRuta.length ? '<div class="small muted" style="margin-top:8px;">No hay clientes en '+esc(jornada.rutaNombre)+'. Lo puedes crear al revisar la factura.</div>' : '')+
       (clienteSel && clienteSel.direccion ? '<div class="small muted" style="margin-top:8px;">'+esc(clienteSel.direccion)+'</div>' : '') +
@@ -2300,7 +2388,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(!lista.length) return '';
       var nNo = lista.filter(function(c){ return noComproUltimaRuta(c); }).length;
       return '<h2 class="section-title">'+esc(r.nombre)+(nNo?(' <span class="small" style="color:var(--red);font-weight:600;">· 🔴 '+nNo+' no compraron en la última salida</span>'):'')+'</h2><div class="card">'+
-        lista.map(clienteRowHtml).join('') + '</div>';
+        gruposPorMunicipio(lista).map(function(gq){
+          return '<div class="small" style="font-weight:700;color:var(--blue);padding:10px 0 2px;">📍 '+esc(gq.nombre)+' <span class="muted">('+gq.clientes.length+')</span></div>'+gq.clientes.map(clienteRowHtml).join('');
+        }).join('') + '</div>';
     }).join('');
     var sinRutaHtml = sinRuta.length ? '<h2 class="section-title">Sin ruta</h2><div class="card">'+sinRuta.map(clienteRowHtml).join('')+'</div>' : '';
 
@@ -2593,6 +2683,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div><span class="product-name">Factura #'+v.numero+'</span>'+(v.editadoEn?' <span class="badge" style="background:var(--amber-dim);color:var(--amber);">Editada</span>':'')+(v.tipoPago==='credito'?' <span class="badge" style="background:rgba(248,113,113,.15);color:var(--red);">Crédito'+(v.saldo>0?(' · Saldo '+fmtCOP(v.saldo)):' · Pagado')+'</span>':'')+'<div class="small muted">'+esc(v.clienteNombre)+' · '+fmtFecha(v.fecha)+'</div>'+(v.comentarios?('<div class="small" style="margin-top:2px;">💬 '+esc(v.comentarios.length>80?v.comentarios.slice(0,80)+'…':v.comentarios)+'</div>'):'')+'</div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;">'+fmtCOP(v.total)+'</span>'+
+          (v.comprobantePartes ? '<button class="btn btn-sm btn-ghost" data-action="ver-comprobante" data-id="'+v.id+'" title="Comprobante">🧾</button>' : '')+
           '<button class="btn btn-sm btn-ghost" data-action="ver-pdf" data-id="'+v.id+'">👁 Ver</button>'+
           '<button class="btn btn-sm btn-ghost" data-action="ver-factura" data-id="'+v.id+'">Enviar</button>'+
         '</div>'+
@@ -2707,6 +2798,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var clienteRF = clienteCheckout();
       var cfgRF = cfgEmpresa();
       var pagoRF = {tipo: state.checkoutPago||'contado', abono: state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF, medio: state.checkoutMedio||'efectivo', comentarios:(state.checkoutComentarios||'').trim(),
+        montoEfectivo: montosPago(state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF).montoEfectivo,
+        montoTransferencia: montosPago(state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF).montoTransferencia,
         vence: state.checkoutPago==='credito' ? fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), state.checkoutPlazo || 8) : null};
       var saldoRF = Math.max(0, totalRF - (pagoRF.abono||0));
       var previewTexto = textoFactura('(sin asignar)', clienteRF, itemsRF, totalRF, cfgRF, pagoRF);
@@ -2719,7 +2812,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="field"><label>Teléfono (WhatsApp)</label><input id="rf-nc-telefono" inputmode="tel" value="'+esc(nc.telefono||'')+'" placeholder="Ej: 3001234567"></div>'+
           '<div class="field-row">'+
             '<div class="field"><label>NIT / CC</label><input id="rf-nc-documento" inputmode="numeric" value="'+esc(nc.documento||'')+'"></div>'+
-            '<div class="field"><label>Ciudad</label><input id="rf-nc-ciudad" value="'+esc(nc.ciudad||'')+'"></div>'+
+            '<div class="field"><label>Municipio</label><input id="rf-nc-ciudad" value="'+esc(nc.ciudad||'')+'"></div>'+
           '</div>'+
           '<div class="field"><label>Dirección</label><input id="rf-nc-direccion" value="'+esc(nc.direccion||'')+'"></div>'+
           '<div class="field" style="margin-bottom:0;"><label>Ruta</label><select id="rf-nc-rutaId">'+
@@ -2730,16 +2823,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         :
         ('<div class="field"><div class="row between"><label style="margin:0 0 5px 2px;">Cliente *</label>'+
           '<button class="link-btn" data-action="rf-crear-cliente">+ Crear cliente nuevo</button></div>'+
+          selectorMunicipio(clientesParaVenta())+
           '<select id="rf-cliente">'+
             '<option value="">Elige el cliente…</option>'+
-            clientesParaVenta().sort(function(a,b){
-              var ra = (state.selectedRutaId!=='__todas__' && a.rutaId===state.selectedRutaId)?0:1;
-              var rb = (state.selectedRutaId!=='__todas__' && b.rutaId===state.selectedRutaId)?0:1;
-              return ra-rb || String(a.nombre).localeCompare(String(b.nombre));
-            }).map(function(c){
-              var ru = rutaById(c.rutaId);
-              return '<option value="'+c.id+'"'+(state.selectedClienteId===c.id?' selected':'')+'>'+esc(c.nombre)+(c.telefono?(' · '+esc(c.telefono)):'')+(ru?(' · '+esc(ru.nombre)):'')+'</option>';
-            }).join('')+
+            opcionesClientesPorMunicipio(clientesParaVenta(), state.selectedClienteId, function(c){ var ru = rutaById(c.rutaId); return ru ? (' · '+esc(ru.nombre)) : ''; })+
           '</select>'+
           (state.selectedClienteId && clienteById(state.selectedClienteId) ? '<div class="small" style="margin-top:6px;font-weight:600;">🕒 '+esc(textoUltimaCompra(state.selectedClienteId))+'</div>' : '')+
           '</div>');
@@ -2760,10 +2847,24 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:10px;">Saldo pendiente: <strong id="rf-saldo">'+fmtCOP(saldoRF)+'</strong></div>'
           : '<div class="small muted" style="margin-bottom:10px;">Se registra como pagada de contado.</div>')+
         '<label>'+(state.checkoutPago==='credito' ? 'Medio de pago del abono' : 'Medio de pago')+'</label>'+
-        '<div class="chips" style="margin-bottom:10px;">'+
-          '<button class="chip'+(state.checkoutMedio!=='transferencia'?' active':'')+'" data-action="set-medio-pago" data-medio="efectivo">💵 Efectivo</button>'+
+        '<div class="chips" style="margin-bottom:10px;flex-wrap:wrap;">'+
+          '<button class="chip'+((state.checkoutMedio||'efectivo')==='efectivo'?' active':'')+'" data-action="set-medio-pago" data-medio="efectivo">💵 Efectivo</button>'+
           '<button class="chip'+(state.checkoutMedio==='transferencia'?' active':'')+'" data-action="set-medio-pago" data-medio="transferencia">📲 Transferencia</button>'+
+          '<button class="chip'+(state.checkoutMedio==='mixto'?' active':'')+'" data-action="set-medio-pago" data-medio="mixto">💵+📲 Efectivo y transferencia</button>'+
         '</div>'+
+        (state.checkoutMedio==='mixto' ? (function(){
+          var pagadoRF = state.checkoutPago==='credito' ? (Number(state.checkoutAbono)||0) : totalRF;
+          var trRF = Math.max(0, Math.min(pagadoRF, Number(state.checkoutTransf)||0));
+          return '<div class="field-row">'+
+            '<div class="field"><label>¿Cuánto por transferencia?</label><input id="rf-transf" type="number" inputmode="numeric" min="0" value="'+(state.checkoutTransf||'')+'" data-pagado="'+pagadoRF+'"></div>'+
+            '<div class="field"><label>En efectivo</label><div id="rf-efectivo" class="mono" style="padding:12px 4px;font-weight:700;">'+fmtCOP(pagadoRF - trRF)+'</div></div>'+
+          '</div>';
+        })() : '')+
+        ((state.checkoutMedio==='transferencia' || state.checkoutMedio==='mixto') ?
+          '<div class="field"><label>Foto del comprobante (opcional)</label>'+
+            (state.checkoutComprobante ? '<div class="row between small" style="margin-bottom:6px;"><span style="color:var(--green);font-weight:700;">✓ Comprobante listo</span><button class="link-btn" data-action="quitar-comprobante">Quitar</button></div>' : '')+
+            (state.editandoVenta && state.editandoVenta.comprobantePartes && !state.checkoutComprobante ? '<div class="small muted" style="margin-bottom:6px;">Ya tiene comprobante; si eliges otra foto, se reemplaza.</div>' : '')+
+            '<input id="rf-comprobante" type="file" accept="image/*"></div>' : '')+
         '<div class="field"><label>Comentarios (opcional, salen en la factura)</label>'+
           '<textarea id="rf-comentarios" rows="3" placeholder="Ej: se entrega el viernes, cambio pendiente de 2 direccionales…">'+esc(state.checkoutComentarios||'')+'</textarea></div>'+
         '<label>Así se verá la factura</label>'+
@@ -2798,6 +2899,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='ver-comprobante'){
+      var vc = state.modal;
+      html = '<h3>🧾 Comprobante · #'+esc(vc.venta.numero)+' · '+esc(vc.venta.clienteNombre||'')+'</h3>'+
+        '<div class="small muted" style="margin-bottom:8px;">'+esc(textoMedio({medio:vc.venta.medioPago, montoEfectivo:vc.venta.montoEfectivo, montoTransferencia:vc.venta.montoTransferencia}))+'</div>'+
+        (vc.error ? '<div class="small" style="color:var(--red);">No se pudo cargar el comprobante.</div>' :
+          (vc.src ? '<div class="visor-pdf'+(vc.zoom?' zoom':'')+'" data-action="zoom-pdf"><img src="'+vc.src+'" alt="Comprobante"></div>' : '<div class="empty" style="padding:30px;">Cargando…</div>'))+
+        '<div class="row" style="margin-top:10px;gap:8px;">'+
+          '<button class="btn btn-primary" style="flex:1" data-action="compartir-comprobante" '+(vc.src?'':'disabled')+'>Compartir</button>'+
+          (vc.anterior ? '<button class="btn btn-ghost" style="flex:1" data-action="volver-factura">Volver</button>' : '<button class="btn btn-ghost" style="flex:1" data-action="cerrar-modal">Cerrar</button>')+
+        '</div>';
     } else if(state.modal.type==='encargos'){
       var me = state.modal;
       var pend = encargosPendientes(null).slice().sort(function(a,b){
@@ -3037,6 +3148,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<button class="btn btn-primary btn-block" style="margin-top:10px;padding:13px;" data-action="compartir-pdf" '+(state.modal.pdf?'':'disabled')+'>'+
           (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
         '</button>'+
+        (mv.comprobantePartes ? '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="ver-comprobante" data-id="'+mv.id+'">🧾 Ver comprobante de pago</button>' : '')+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="ver-pdf-modal" '+(state.modal.pdf?'':'disabled')+'>👁 Ver cuenta de cobro</button>'+
         '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
         (state.isAdmin && mv.id ? (
@@ -3125,7 +3237,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div class="field"><label>Dirección</label><input id="mc-direccion" value="'+esc(c.direccion||'')+'"></div>'+
         '<div class="field-row">'+
           '<div class="field"><label>NIT / CC (opcional)</label><input id="mc-documento" inputmode="numeric" value="'+esc(c.documento||'')+'"></div>'+
-          '<div class="field"><label>Ciudad (opcional)</label><input id="mc-ciudad" value="'+esc(c.ciudad||'')+'"></div>'+
+          '<div class="field"><label>Municipio</label><input id="mc-ciudad" value="'+esc(c.ciudad||'')+'" placeholder="Ej: Granada"></div>'+
         '</div>'+
         '<div class="field"><label>Ruta</label><select id="mc-ruta">'+
           '<option value="">Sin ruta</option>'+
@@ -3413,6 +3525,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.checkoutAbono = ve.tipoPago==='credito' ? (Number(ve.abono)||0) : 0;
       state.checkoutComentarios = ve.comentarios || '';
       state.checkoutMedio = ve.medioPago || 'efectivo';
+      state.checkoutTransf = ve.medioPago==='mixto' ? (Number(ve.montoTransferencia)||0) : 0;
+      state.checkoutComprobante = null;
       state.checkoutPlazo = ve.plazoCredito || (ve.fechaVencimiento ? (Math.round((new Date(ve.fechaVencimiento) - new Date(ve.fecha)) / 864e5) >= 12 ? 15 : 8) : 8);
       state.modal = null; state.activeTab = 'vender';
       render(); window.scrollTo(0,0);
@@ -3452,6 +3566,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var mF = state.modal; if(!mF || !mF.pdf) return;
       verPdfVenta(mF.venta, mF.cliente, mF.pdf, mF);
     }
+    else if(action==='ver-comprobante'){
+      var vComp = state.ventas.find(function(v){ return v.id===id; }) || (state.modal && state.modal.venta);
+      if(!vComp) return;
+      var mC = { type:'ver-comprobante', venta:vComp, src:null, error:false, zoom:false, anterior: (state.modal && state.modal.type==='factura-lista') ? state.modal : null };
+      state.modal = mC; render();
+      leerComprobante(vComp).then(function(src){ mC.src = src; if(state.modal===mC) render(); })
+        .catch(function(err){ console.error(err); mC.error = true; if(state.modal===mC) render(); });
+    }
+    else if(action==='compartir-comprobante'){
+      var mCC = state.modal; if(!mCC || !mCC.src) return;
+      fetch(mCC.src).then(function(r){ return r.blob(); }).then(function(bl){
+        compartirArchivo(new File([bl], 'Comprobante-'+mCC.venta.numero+'.jpg', {type:'image/jpeg'}));
+      });
+    }
     else if(action==='volver-factura'){ if(state.modal && state.modal.anterior){ state.modal = state.modal.anterior; render(); } }
     else if(action==='zoom-pdf'){ if(state.modal){ state.modal.zoom = !state.modal.zoom; render(); } }
     else if(action==='compartir-pdf-visor'){
@@ -3467,7 +3595,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(vf) abrirFactura(vf, null, false);
     }
     else if(action==='set-plazo'){ state.checkoutPlazo = Number(t.getAttribute('data-dias')) || 8; render({preservar:true}); }
+    else if(action==='filtro-municipio'){ var mF = t.getAttribute('data-m'); state.filtroMunicipio = mF || null; render({preservar:true}); }
     else if(action==='set-medio-pago'){ state.checkoutMedio = t.getAttribute('data-medio'); render({preservar:true}); }
+    else if(action==='quitar-comprobante'){ state.checkoutComprobante = null; render({preservar:true}); }
     else if(action==='set-tipo-pago'){
       state.checkoutPago = t.getAttribute('data-tipo');
       if(state.checkoutPago!=='credito') state.checkoutAbono = 0;
@@ -3649,6 +3779,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(cabMap[e.target.id]){ state.modal.cab[cabMap[e.target.id]] = e.target.id==='rc-total' ? (Number(e.target.value)||0) : e.target.value; return; }
     }
     if(e.target.id==='rf-comentarios'){ state.checkoutComentarios = e.target.value; return; }
+    if(e.target.id==='rf-transf'){
+      state.checkoutTransf = Number(e.target.value)||0;
+      var pagT = Number(e.target.getAttribute('data-pagado'))||0;
+      var efT = document.getElementById('rf-efectivo'); if(efT) efT.textContent = fmtCOP(pagT - Math.max(0, Math.min(pagT, state.checkoutTransf)));
+      return;
+    }
     if(e.target.id && e.target.id.indexOf('rf-nc-')===0 && state.modal){
       state.modal.nc = state.modal.nc || {};
       state.modal.nc[e.target.id.slice(6)] = e.target.value;
@@ -3704,6 +3840,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(!!dupN !== !!state.modal.duplicada){ state.modal.duplicada = dupN; if(dupN) state.modal.sumarStock = false; render({preservar:true}); }
         return;
       }
+    }
+    if(e.target.id==='rf-comprobante'){
+      var fC = e.target.files && e.target.files[0];
+      if(fC){ state.checkoutComprobante = fC; render({preservar:true}); toast('Comprobante agregado'); }
+      return;
     }
     if(e.target.id==='enc-cliente' && state.modal && state.modal.type==='encargos'){ state.modal.clienteId = e.target.value; return; }
     if(e.target.id==='sd-venta' && state.modal && state.modal.type==='soporte-dian'){ state.modal.ventaId = e.target.value; render(); return; }
