@@ -337,7 +337,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-abono','guardar-abono'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -2673,9 +2673,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">Factura #'+v.numero+' · '+fmtFecha(v.fecha)+'</div></div>'+
         '<div class="row">'+
           '<span class="mono" style="font-weight:700;color:var(--red);">'+fmtCOP(v.saldo)+'</span>'+
+          (state.isAdmin ? '<button class="btn btn-sm btn-primary" data-action="abrir-abono" data-id="'+v.id+'">Abonar</button>' : '')+
           (state.isAdmin ? '<button class="btn btn-sm btn-ghost" data-action="marcar-pagado" data-id="'+v.id+'">Marcar pagado</button>' : '')+
         '</div>'+
-      '</div></div>';
+      '</div>'+
+      ((v.abonos && v.abonos.length) ? '<div class="small muted" style="margin-top:4px;">Abonos: '+v.abonos.map(function(a){ return esc(new Date(a.fecha).toLocaleDateString('es-CO'))+' '+fmtCOP(a.monto)+' '+(a.medio==='transferencia'?'📲':'💵'); }).join(' · ')+'</div>' : '')+
+      '</div>';
     }).join('') : '<div class="empty" style="padding:16px;">Nadie debe en esta ruta.</div>';
 
     var facturasHtml = ventasRuta.length ? ventasRuta.map(function(v){
@@ -2899,6 +2902,28 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted" style="margin-bottom:12px;">'+(state.modal.file ? ('Listo: '+esc(state.modal.file.name)+' ('+Math.max(1,Math.round(state.modal.file.size/1024))+' KB). En el celular puedes guardarlo en Archivos, enviarlo por WhatsApp o por correo.') : 'Preparando… esto puede tardar unos segundos.')+'</div>')+
         '<button class="btn btn-primary btn-block" style="padding:13px;" data-action="compartir-archivo" '+(state.modal.file?'':'disabled')+'>'+(state.modal.file?'Abrir / compartir':'Preparando…')+'</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cerrar</button>';
+    } else if(state.modal.type==='abono'){
+      var ma = state.modal; var va = ma.venta;
+      html = '<h3>Abono · '+esc(va.clienteNombre||'')+' · #'+esc(va.numero)+'</h3>'+
+        '<div class="small" style="margin-bottom:12px;">Saldo pendiente: <strong style="color:var(--red);">'+fmtCOP(va.saldo)+'</strong>'+
+          (vencimientoDe(va) ? ' · vence '+esc(new Date(vencimientoDe(va)).toLocaleDateString('es-CO')) : '')+'</div>'+
+        '<label>¿Cómo pagó?</label>'+
+        '<div class="chips" style="margin-bottom:10px;">'+
+          '<button class="chip'+(ma.medio!=='transferencia'?' active':'')+'" data-action="abono-medio" data-medio="efectivo">💵 Efectivo</button>'+
+          '<button class="chip'+(ma.medio==='transferencia'?' active':'')+'" data-action="abono-medio" data-medio="transferencia">📲 Transferencia</button>'+
+        '</div>'+
+        '<div class="field"><label>'+(ma.medio==='transferencia'?'Valor que dice la transferencia':'Valor recibido')+'</label>'+
+          '<input id="ab-monto" type="number" inputmode="numeric" min="0" value="'+(ma.monto||'')+'" placeholder="Ej: 50000"></div>'+
+        '<button class="link-btn" style="padding:0;margin:-4px 0 10px;" data-action="abono-total">Paga todo el saldo ('+fmtCOP(va.saldo)+')</button>'+
+        (ma.medio==='transferencia' ?
+          '<div class="field"><label>Imagen de la transferencia</label>'+
+            (ma.foto ? '<div class="row between small" style="margin-bottom:6px;"><span style="color:var(--green);font-weight:700;">✓ Imagen lista</span><button class="link-btn" data-action="abono-quitar-foto">Quitar</button></div>' :
+              '<div id="zona-pegar-abono" class="zona-pegar" contenteditable="true" data-ph="Toca aquí y elige «Pegar»" style="min-height:70px;margin-bottom:8px;"></div>')+
+            '<input id="ab-foto" type="file" accept="image/*"></div>' : '')+
+        '<div class="row" style="margin-top:10px;gap:8px;">'+
+          '<button class="btn btn-primary" style="flex:1;padding:13px;" data-action="guardar-abono" '+(ma.guardando?'disabled':'')+'>'+(ma.guardando?'Guardando…':'Guardar abono')+'</button>'+
+          '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
+        '</div>';
     } else if(state.modal.type==='ver-comprobante'){
       var vc = state.modal;
       html = '<h3>🧾 Comprobante · #'+esc(vc.venta.numero)+' · '+esc(vc.venta.clienteNombre||'')+'</h3>'+
@@ -3149,6 +3174,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           (state.modal.pdf ? (tel?'2. ':'')+'Compartir factura PDF' : (state.modal.pdfError ? 'No se pudo crear el PDF' : 'Preparando PDF…'))+
         '</button>'+
         (mv.comprobantePartes ? '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="ver-comprobante" data-id="'+mv.id+'">🧾 Ver comprobante de pago</button>' : '')+
+        (function(){
+          var vAct = state.ventas.find(function(x){ return x.id===mv.id; }) || mv;
+          if(!vAct.abonos || !vAct.abonos.length) return '';
+          return '<div class="card" style="margin-top:10px;padding:10px 12px;"><div class="small" style="font-weight:700;margin-bottom:4px;">Abonos</div>'+
+            vAct.abonos.map(function(a, i){
+              return '<div class="row between small" style="padding:3px 0;"><span>'+esc(new Date(a.fecha).toLocaleDateString('es-CO'))+' · '+(a.medio==='transferencia'?'📲 Transferencia':'💵 Efectivo')+'</span>'+
+                '<span><strong>'+fmtCOP(a.monto)+'</strong>'+(a.comprobante?(' <button class="link-btn" data-action="ver-comprobante-abono" data-id="'+vAct.id+'" data-n="'+i+'">🧾</button>'):'')+'</span></div>';
+            }).join('')+
+            '<div class="small muted" style="margin-top:4px;">Saldo: '+fmtCOP(vAct.saldo)+'</div></div>';
+        })()+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="ver-pdf-modal" '+(state.modal.pdf?'':'disabled')+'>👁 Ver cuenta de cobro</button>'+
         '<div class="small muted" style="margin-top:8px;">'+(tel?'Primero abre el chat; luego en "Compartir factura PDF" elige WhatsApp y ese chat.':'En "Compartir" eliges WhatsApp y el chat del cliente, o "Guardar en Archivos".')+'</div>'+
         (state.isAdmin && mv.id ? (
@@ -3480,6 +3515,51 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='filtro-deudor-ruta'){ state.deudorFiltroRuta = t.getAttribute('data-ruta'); render(); }
     else if(action==='toggle-movimientos'){ state.movAbierto = !state.movAbierto; render(); }
     else if(action==='filtro-hist-ruta'){ state.histRuta = t.getAttribute('data-ruta'); render(); }
+    else if(action==='abrir-abono'){
+      var vAb = state.ventas.find(function(v){ return v.id===id; }); if(!vAb) return;
+      state.modal = { type:'abono', venta:vAb, medio:'transferencia', monto:'', foto:null }; render();
+    }
+    else if(action==='abono-medio'){ state.modal.medio = t.getAttribute('data-medio'); render({preservar:true}); }
+    else if(action==='abono-total'){ state.modal.monto = Number(state.modal.venta.saldo)||0; var inA = document.getElementById('ab-monto'); if(inA) inA.value = state.modal.monto; }
+    else if(action==='abono-quitar-foto'){ state.modal.foto = null; render(); }
+    else if(action==='guardar-abono'){
+      var mA = state.modal; var vA = state.ventas.find(function(v){ return v.id===mA.venta.id; }) || mA.venta;
+      var montoA = Math.round(Number(document.getElementById('ab-monto').value)||0);
+      var saldoA = Number(vA.saldo)||0;
+      if(montoA <= 0){ toast('Escribe el valor del abono'); return; }
+      if(montoA > saldoA){ toast('El abono es mayor que el saldo ('+fmtCOP(saldoA)+')'); return; }
+      mA.guardando = true; render();
+      var partesA = null;
+      if(mA.medio==='transferencia' && mA.foto){
+        try{ partesA = await partesComprobante(mA.foto); }
+        catch(eA){ toast('No se pudo guardar la imagen; el abono se guarda sin ella.'); }
+      }
+      var nAb = (vA.abonos||[]).length;
+      var claveA = vA.id + '_ab' + nAb;
+      var bA = writeBatch(fs);
+      (partesA||[]).forEach(function(d, i){ bA.set(doc(fs, 'comprobantes/'+claveA+'_'+i), { ventaId:vA.id, abono:nAb, parte:i, data:d, creadoPor:state.auth.user.uid }); });
+      var abonoNuevo = { monto:montoA, medio:mA.medio, fecha:todayISO(), por:nombreUsuario(), comprobante: partesA ? claveA : null, comprobantePartes: partesA ? partesA.length : 0 };
+      var nuevoSaldo = saldoA - montoA;
+      bA.update(doc(fs, 'ventas/'+vA.id), {
+        abonos: (vA.abonos||[]).concat([abonoNuevo]),
+        abono: (Number(vA.abono)||0) + montoA,
+        saldo: nuevoSaldo
+      });
+      enSegundoPlano(bA.commit());
+      state.modal = null; render();
+      toast(nuevoSaldo > 0 ? ('Abono de '+fmtCOP(montoA)+' guardado · queda debiendo '+fmtCOP(nuevoSaldo)) : 'Abono guardado · factura pagada ✓');
+    }
+    else if(action==='ver-comprobante-abono'){
+      var vCA = state.ventas.find(function(v){ return v.id===id; }); if(!vCA) return;
+      var ab = (vCA.abonos||[])[Number(t.getAttribute('data-n'))]; if(!ab || !ab.comprobante) return;
+      var mCA = { type:'ver-comprobante', venta:Object.assign({}, vCA, {medioPago:'transferencia', montoTransferencia:ab.monto}), src:null, error:false, zoom:false, anterior: (state.modal && state.modal.type==='factura-lista') ? state.modal : null };
+      state.modal = mCA; render();
+      (async function(){
+        var tr = [];
+        for(var i = 0; i < (ab.comprobantePartes||0); i++){ var ds = await getDoc(doc(fs, 'comprobantes/'+ab.comprobante+'_'+i)); if(!ds.exists()) throw {}; tr.push(ds.data().data); }
+        return 'data:image/jpeg;base64,'+tr.join('');
+      })().then(function(src){ mCA.src = src; if(state.modal===mCA) render(); }).catch(function(){ mCA.error = true; if(state.modal===mCA) render(); });
+    }
     else if(action==='marcar-pagado'){
       await db.doc('ventas/'+id).update({saldo:0});
       toast('Factura marcada como pagada');
@@ -3778,6 +3858,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var cabMap = {'rc-proveedor':'proveedor','rc-numero':'numero','rc-fecha':'fecha','rc-total':'total'};
       if(cabMap[e.target.id]){ state.modal.cab[cabMap[e.target.id]] = e.target.id==='rc-total' ? (Number(e.target.value)||0) : e.target.value; return; }
     }
+    if(e.target.id==='ab-monto' && state.modal && state.modal.type==='abono'){ state.modal.monto = e.target.value; return; }
     if(e.target.id==='rf-comentarios'){ state.checkoutComentarios = e.target.value; return; }
     if(e.target.id==='rf-transf'){
       state.checkoutTransf = Number(e.target.value)||0;
@@ -3840,6 +3921,11 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(!!dupN !== !!state.modal.duplicada){ state.modal.duplicada = dupN; if(dupN) state.modal.sumarStock = false; render({preservar:true}); }
         return;
       }
+    }
+    if(e.target.id==='ab-foto' && state.modal && state.modal.type==='abono'){
+      var fAb = e.target.files && e.target.files[0];
+      if(fAb){ state.modal.foto = fAb; render(); toast('Imagen agregada'); }
+      return;
     }
     if(e.target.id==='rf-comprobante'){
       var fC = e.target.files && e.target.files[0];
@@ -3945,6 +4031,16 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
   // Pegar la factura en el recuadro punteado
   document.addEventListener('paste', function(e){
+    var zonaAb = e.target && e.target.closest && e.target.closest('#zona-pegar-abono');
+    if(zonaAb && state.modal && state.modal.type==='abono'){
+      e.preventDefault();
+      var cdA = e.clipboardData; var imgA = null;
+      if(cdA && cdA.files && cdA.files.length) imgA = cdA.files[0];
+      else if(cdA && cdA.items){ for(var ia = 0; ia < cdA.items.length; ia++){ if(cdA.items[ia].kind==='file'){ imgA = cdA.items[ia].getAsFile(); if(imgA) break; } } }
+      if(imgA && /^image\//.test(imgA.type)){ state.modal.foto = imgA; render(); toast('Imagen pegada'); }
+      else toast('Copia la imagen de la transferencia y vuelve a pegar.');
+      return;
+    }
     var zona = e.target && e.target.closest && e.target.closest('#zona-pegar');
     if(!zona || !state.modal || state.modal.type!=='pegar-compra' || !state.isAdmin) return;
     e.preventDefault();
