@@ -661,13 +661,17 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var ventas = state.ventas.filter(function(v){ return v.jornadaId===j.id; }).sort(function(a,b){ return (a.numero||0)-(b.numero||0); });
     var gastos = state.gastos.filter(function(g){ return g.jornadaId===j.id; });
     var r = { facturas:ventas.length, totalVendido:0, contado:0, credito:0, abonos:0, saldoPendiente:0, efectivo:0, transferencia:0, sinMedio:0,
+      cobradoDespues:0, despuesEfectivo:0, despuesTransferencia:0,
       unidades:0, totalGastos:0, productos:[], deudores:[], gastos:[], numeros:[] };
     var porProd = {};
     ventas.forEach(function(v){
       var t = Number(v.total)||0;
       r.totalVendido += t; r.numeros.push(v.numero);
       if(v.tipoPago==='credito'){
-        r.credito += t; r.abonos += Number(v.abono)||0; r.saldoPendiente += Number(v.saldo)||0;
+        var pp = pagosPosteriores(v);
+        r.credito += t; r.abonos += Math.max(0, (Number(v.abono)||0) - (v.abonos||[]).reduce(function(s2,a){ return s2+(Number(a.monto)||0); },0));
+        r.saldoPendiente += Number(v.saldo)||0;
+        r.cobradoDespues += pp.total; r.despuesEfectivo += pp.efectivo; r.despuesTransferencia += pp.transferencia;
         if((Number(v.saldo)||0) > 0) r.deudores.push({cliente:v.clienteNombre||'', numero:v.numero, saldo:Number(v.saldo)||0, total:t});
       } else { r.contado += t; }
       var rm = recibidoPorMedio(v);
@@ -684,6 +688,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     r.recibido = r.contado + r.abonos;
     // los gastos de ruta se pagan en efectivo; lo que llegó por transferencia ya está en la cuenta
     r.efectivoNeto = r.efectivo + r.sinMedio - r.totalGastos;
+    r.totalCobrado = r.recibido + r.cobradoDespues;
     return r;
   }
   function ventasSinSalida(){
@@ -723,7 +728,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     L.push('Gastos: '+fmtCOP(r.totalGastos));
     L.push('*Efectivo a entregar: '+fmtCOP(r.efectivoNeto)+'*');
-    L.push('*Quedaron debiendo: '+fmtCOP(r.saldoPendiente)+'*');
+    if(r.cobradoDespues) L.push('Cobrado después de la ruta: '+fmtCOP(r.cobradoDespues)+' (💵 '+fmtCOP(r.despuesEfectivo||0)+' · 📲 '+fmtCOP(r.despuesTransferencia||0)+')');
+    L.push('*'+(j.estado==='cerrada'?'Deben todavía':'Quedaron debiendo')+': '+fmtCOP(r.saldoPendiente)+'*');
+    if(r.totalCobrado!=null && r.cobradoDespues) L.push('*Total cobrado de esta ruta: '+fmtCOP(r.totalCobrado)+'*');
     r.deudores.forEach(function(d){ L.push('  · '+d.cliente+' (#'+d.numero+'): '+fmtCOP(d.saldo)); });
     L.push('');
     L.push('Productos ('+r.unidades+' und):');
@@ -1439,9 +1446,19 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(medio==='mixto') transf = Math.max(0, Math.min(pagado, Number(state.checkoutTransf)||0));
     return { medioPago:medio, montoEfectivo: medio ? pagado - transf : 0, montoTransferencia: medio ? transf : 0 };
   }
-  // Lo recibido de una venta, separado (las ventas viejas solo tienen el medio)
+  // Pagos de un crédito hechos después de la venta (abonos registrados en Deudores o "Marcar pagado")
+  function pagosPosteriores(v){
+    var r = { total:0, efectivo:0, transferencia:0 };
+    if(v.tipoPago!=='credito') return r;
+    (v.abonos||[]).forEach(function(a){ var m = Number(a.monto)||0; r.total += m; if(a.medio==='efectivo') r.efectivo += m; else r.transferencia += m; });
+    // ventas marcadas como pagadas antes de que se registraran los pagos: lo que falta cuadrar se cuenta como transferencia
+    var sinRegistro = (Number(v.total)||0) - (Number(v.abono)||0) - (Number(v.saldo)||0);
+    if(sinRegistro > 0){ r.total += sinRegistro; r.transferencia += sinRegistro; }
+    return r;
+  }
+  // Lo recibido al momento de la venta, separado (las ventas viejas solo tienen el medio)
   function recibidoPorMedio(v){
-    var rec = v.tipoPago==='credito' ? (Number(v.abono)||0) : (Number(v.total)||0);
+    var rec = v.tipoPago==='credito' ? Math.max(0, (Number(v.abono)||0) - (v.abonos||[]).reduce(function(s2,a){ return s2+(Number(a.monto)||0); },0)) : (Number(v.total)||0);
     if(v.montoEfectivo!=null || v.montoTransferencia!=null) return { efectivo:Number(v.montoEfectivo)||0, transferencia:Number(v.montoTransferencia)||0, sinMedio:0 };
     if(v.medioPago==='transferencia') return { efectivo:0, transferencia:rec, sinMedio:0 };
     if(v.medioPago==='efectivo') return { efectivo:rec, transferencia:0, sinMedio:0 };
@@ -3118,18 +3135,19 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         (cm.id ? '<button class="btn btn-danger btn-block" style="margin-top:10px;" data-action="eliminar-compra">Eliminar factura de compra</button>' : '');
     } else if(state.modal.type==='balance-ruta'){
       var jm = state.modal.jornada;
-      var rm = (jm.estado==='cerrada' && jm.resumen) ? jm.resumen : resumenJornada(jm);
+      var hayVentasJ = state.ventas.some(function(v){ return v.jornadaId===jm.id; });
+      var rm = (jm.estado==='cerrada' && jm.resumen && !hayVentasJ) ? jm.resumen : resumenJornada(jm);
       var filaB = function(etq, val, color, fuerte){ return '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border);"><span class="small'+(fuerte?'':' muted')+'"'+(fuerte?' style="font-weight:700;"':'')+'>'+etq+'</span><span class="mono" style="font-weight:'+(fuerte?'800':'600')+';'+(color?('color:'+color+';'):'')+'">'+val+'</span></div>'; };
       html = '<h3>Balance · '+esc(jm.rutaNombre)+'</h3>'+
         '<div class="small muted" style="margin-bottom:12px;">'+esc(jm.iniciadaPorNombre||'')+' · '+fmtFecha(jm.iniciadaEn)+(jm.cerradaEn?(' → '+horaCorta(jm.cerradaEn)):' · en curso')+'</div>'+
         '<div class="kpi-grid">'+
           '<div class="kpi"><div class="num mono">'+fmtCOP(rm.totalVendido)+'</div><div class="lbl">Total vendido · '+rm.facturas+' factura(s)</div></div>'+
-          '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(rm.saldoPendiente)+'</div><div class="lbl">Quedaron debiendo</div></div>'+
+          '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(rm.saldoPendiente)+'</div><div class="lbl">'+(jm.estado==='cerrada'?'Deben todavía':'Quedaron debiendo')+'</div></div>'+
         '</div>'+
         '<div class="card" style="padding:10px 14px;">'+
           filaB('Ventas de contado', fmtCOP(rm.contado))+
           filaB('Ventas a crédito', fmtCOP(rm.credito))+
-          filaB('Abonos recibidos', fmtCOP(rm.abonos))+
+          filaB('Abonos recibidos en la ruta', fmtCOP(rm.abonos))+
           filaB('Dinero recibido', fmtCOP(rm.recibido), null, true)+
           (rm.efectivo!=null ?
             filaB('💵 En efectivo'+(rm.sinMedio?' <span class="muted">(incluye '+fmtCOP(rm.sinMedio)+' sin medio registrado)</span>':''), fmtCOP((rm.efectivo||0)+(rm.sinMedio||0)))+
@@ -3137,6 +3155,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           filaB('Gastos de ruta', '− '+fmtCOP(rm.totalGastos), 'var(--red)')+
           filaB('Efectivo a entregar', fmtCOP(rm.efectivoNeto), 'var(--green)', true)+
         '</div>'+
+        ((rm.credito || rm.cobradoDespues) ? '<h2 class="section-title">Créditos de esta ruta</h2><div class="card" style="padding:10px 14px;">'+
+          filaB('Cobrado después de la ruta', fmtCOP(rm.cobradoDespues||0), 'var(--green)', true)+
+          (rm.cobradoDespues ? filaB('💵 En efectivo', fmtCOP(rm.despuesEfectivo||0))+filaB('📲 Por transferencia', fmtCOP(rm.despuesTransferencia||0)) : '')+
+          filaB('Deben todavía', fmtCOP(rm.saldoPendiente), 'var(--red)', true)+
+          filaB('Total cobrado de esta ruta', fmtCOP(rm.totalCobrado!=null ? rm.totalCobrado : rm.recibido), null, true)+
+        '</div>' : '')+
         (rm.deudores.length ? '<h2 class="section-title">Quedaron debiendo</h2><div class="card" style="padding:10px 14px;">'+
           rm.deudores.map(function(d){ return filaB(esc(d.cliente)+' <span class="muted">#'+d.numero+'</span>', fmtCOP(d.saldo), 'var(--red)'); }).join('')+'</div>' : '')+
         '<h2 class="section-title">Productos vendidos · '+rm.unidades+' und</h2><div class="card" style="padding:10px 14px;">'+
@@ -3561,7 +3585,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       })().then(function(src){ mCA.src = src; if(state.modal===mCA) render(); }).catch(function(){ mCA.error = true; if(state.modal===mCA) render(); });
     }
     else if(action==='marcar-pagado'){
-      await db.doc('ventas/'+id).update({saldo:0});
+      var vMP = state.ventas.find(function(v){ return v.id===id; }); if(!vMP) return;
+      var saldoMP = Number(vMP.saldo)||0;
+      if(!confirm('¿Marcar pagada la factura #'+vMP.numero+' de '+(vMP.clienteNombre||'')+'?\n\nSe registra un pago de '+fmtCOP(saldoMP)+' por transferencia. Si fue en efectivo o quieres guardar la imagen, usa "Abonar".')) return;
+      await db.doc('ventas/'+id).update({
+        saldo:0, abono:(Number(vMP.abono)||0) + saldoMP,
+        abonos:(vMP.abonos||[]).concat(saldoMP > 0 ? [{ monto:saldoMP, medio:'transferencia', fecha:todayISO(), por:nombreUsuario(), comprobante:null, comprobantePartes:0, marcado:true }] : [])
+      });
       toast('Factura marcada como pagada');
     }
     else if(action==='filtro-periodo'){ state.reportePeriodo = t.getAttribute('data-p'); state.analisisIA=null; render(); }
