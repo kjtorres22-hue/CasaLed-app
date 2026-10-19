@@ -84,6 +84,9 @@
   .brand small{ display:block; color:var(--muted); font-size:11.5px; margin-top:1px; }
   main{ flex:1; padding:14px 14px 96px; max-width:640px; width:100%; margin:0 auto; }
   h2.section-title{ font-family:var(--font-display); font-size:15px; font-weight:600; margin:18px 0 10px; color:var(--text); }
+  #main h2.section-title.plegable{ cursor:pointer; user-select:none; -webkit-user-select:none; }
+  #main h2.section-title .flecha-pleg{ display:inline-block; width:16px; color:var(--muted); font-size:12px; transition:transform .15s; }
+  .oculto-pleg{ display:none !important; }
   h2.section-title:first-child{ margin-top:4px; }
   .card{
     background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
@@ -1998,10 +2001,49 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       if(f){ try{ f.focus({preventScroll:true}); if(c.foco.ini!=null) f.setSelectionRange(c.foco.ini, c.foco.fin); }catch(e){} }
     }
   }
+  // ---------- SECCIONES MINIMIZABLES ----------
+  // Tocar el título de una sección la recoge o la abre; cada celular recuerda cómo la dejaste.
+  var plegadas = (function(){ try{ return JSON.parse(localStorage.getItem('casaled-plegadas')||'{}') || {}; }catch(e){ return {}; } })();
+  function clavePlegable(h){
+    var txt = (h.getAttribute('data-titulo') || h.textContent || '').split('·')[0].replace(/[▾▸]/g,'').replace(/[\d$.,()]+/g,'').trim().toLowerCase();
+    return state.activeTab + ':' + txt;
+  }
+  function objetivosPlegable(h){
+    var bloque = (h.parentElement && h.parentElement.classList.contains('row') && h.parentElement.parentElement && h.parentElement.parentElement.id==='main') ? h.parentElement : h;
+    var obj = []; var sig = bloque.nextElementSibling;
+    if(sig && !sig.querySelector('h2.section-title') && !sig.matches('h2.section-title')){
+      obj.push(sig);
+      if((sig.classList.contains('chips') || sig.classList.contains('filterbar')) && sig.nextElementSibling && !sig.nextElementSibling.matches('h2.section-title')) obj.push(sig.nextElementSibling);
+    }
+    return obj;
+  }
+  function aplicarPlegables(){
+    var main = document.getElementById('main'); if(!main) return;
+    main.querySelectorAll('h2.section-title').forEach(function(h){
+      var obj = objetivosPlegable(h); if(!obj.length) return;
+      if(!h.getAttribute('data-titulo')) h.setAttribute('data-titulo', h.textContent);
+      var k = clavePlegable(h);
+      var cerrada = !!plegadas[k];
+      h.classList.add('plegable'); h.classList.toggle('plegada', cerrada);
+      if(!h.querySelector('.flecha-pleg')) h.insertAdjacentHTML('afterbegin', '<span class="flecha-pleg"></span>');
+      h.querySelector('.flecha-pleg').textContent = cerrada ? '▸' : '▾';
+      obj.forEach(function(o){ o.classList.toggle('oculto-pleg', cerrada); });
+    });
+  }
+  document.addEventListener('click', function(e){
+    var h = e.target.closest && e.target.closest('#main h2.section-title.plegable');
+    if(!h || e.target.closest('button, a, select, input')) return;
+    var k = clavePlegable(h);
+    if(plegadas[k]) delete plegadas[k]; else plegadas[k] = 1;
+    try{ localStorage.setItem('casaled-plegadas', JSON.stringify(plegadas)); }catch(err){}
+    aplicarPlegables();
+  });
+
   function render(opts){
     var capt = (opts && opts.preservar) ? capturarCampos() : null;
     var scrollModal = (function(){ var m = document.querySelector('.modal'); return m ? m.scrollTop : 0; })();
     renderInterno();
+    aplicarPlegables();
     if(capt) restaurarCampos(capt);
     if(opts && opts.preservar){ var m2 = document.querySelector('.modal'); if(m2) m2.scrollTop = scrollModal; }
   }
