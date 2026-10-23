@@ -340,7 +340,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -2360,12 +2360,28 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     return ls.length ? ('Generar pedido · '+ls.length+' artículo'+(ls.length===1?'':'s')) : 'Generar pedido';
   }
 
+  // Valor del inventario a precio de compra (las unidades que quedan, cada una a su costo de lote)
+  function valorInventario(){
+    var filas = state.productos.filter(function(p){ return p.nombre; }).map(function(p){
+      var st = Math.max(0, Number(p.stock)||0);
+      var valor = (p.lotes && p.lotes.length) ? porcionesEnStock(p, st).reduce(function(s2,x){ return s2 + x.cant * x.costo; }, 0) : st * (Number(p.costoCompra)||0);
+      return { p:p, stock:st, costoUnit: st ? valor / st : (Number(p.costoCompra)||0), valor:Math.round(valor), sinCosto: !(Number(p.costoCompra) > 0) && st > 0 };
+    });
+    filas.sort(function(a,b){ return b.valor - a.valor; });
+    return { filas:filas, total: filas.reduce(function(s2,f){ return s2+f.valor; },0), unidades: filas.reduce(function(s2,f){ return s2+f.stock; },0), sinCosto: filas.filter(function(f){ return f.sinCosto; }) };
+  }
+
   function renderInventario(){
     if(state.pedido && state.isAdmin) return renderPedido();
+    var vInv = state.isAdmin ? valorInventario() : null;
     var kpis = '<div class="kpi-grid">'+
       '<div class="kpi"><div class="num mono">'+state.productos.length+'</div><div class="lbl">Productos</div></div>'+
       '<div class="kpi"><div class="num mono">'+state.productos.reduce(function(s,p){return s+(Number(p.stock)||0);},0)+'</div><div class="lbl">Unidades en stock</div></div>'+
-      '</div>';
+      '</div>'+
+      (vInv ? '<button class="card row between" style="width:100%;text-align:left;color:var(--text);margin-top:10px;" data-action="abrir-valor-inventario">'+
+        '<div><div class="small muted">💰 Valor del inventario a precio de compra</div><div class="num mono" style="font-size:22px;font-weight:800;margin-top:2px;">'+fmtCOP(vInv.total)+'</div>'+
+        (vInv.sinCosto.length ? '<div class="small" style="color:var(--amber);">'+vInv.sinCosto.length+' producto(s) con stock sin costo de compra</div>' : '')+'</div>'+
+        '<span class="small" style="color:var(--blue);font-weight:700;">Ver detalle ›</span></button>' : '');
     var lista = state.productos.length ? state.productos.map(function(p, idx){
       var bajo = (Number(p.stock)||0) <= 3;
       return '<div class="product-row">'+
@@ -3022,6 +3038,29 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-primary" style="flex:1" data-action="compartir-comprobante" '+(vc.src?'':'disabled')+'>Compartir</button>'+
           (vc.anterior ? '<button class="btn btn-ghost" style="flex:1" data-action="volver-factura">Volver</button>' : '<button class="btn btn-ghost" style="flex:1" data-action="cerrar-modal">Cerrar</button>')+
         '</div>';
+    } else if(state.modal.type==='valor-inventario'){
+      var vi = valorInventario();
+      html = '<h3>💰 Balance del inventario</h3>'+
+        '<div class="small muted" style="margin-bottom:10px;">Stock actual × precio de compra · '+esc(new Date().toLocaleString('es-CO'))+'</div>'+
+        '<div class="kpi-grid" style="margin-bottom:10px;">'+
+          '<div class="kpi"><div class="num mono">'+fmtCOP(vi.total)+'</div><div class="lbl">Valor total</div></div>'+
+          '<div class="kpi"><div class="num mono">'+fmtNum(vi.unidades)+'</div><div class="lbl">Unidades</div></div>'+
+        '</div>'+
+        '<div class="card" style="padding:4px 12px;">'+
+          '<div class="row between small muted" style="padding:6px 0;border-bottom:1px solid var(--border);font-weight:700;"><span>Producto</span><span>Stock × costo = valor</span></div>'+
+          vi.filas.map(function(f){
+            return '<div class="row between" style="padding:7px 0;border-bottom:1px solid var(--border);gap:8px;">'+
+              '<span class="small" style="min-width:0;">'+esc(f.p.nombre)+(f.sinCosto?' <span style="color:var(--amber);">· sin costo</span>':'')+'</span>'+
+              '<span class="small mono" style="text-align:right;white-space:nowrap;">'+fmtNum(f.stock)+' × '+fmtCOP(f.costoUnit)+'<br><strong>'+fmtCOP(f.valor)+'</strong></span>'+
+            '</div>';
+          }).join('')+
+          '<div class="row between" style="padding:9px 0;"><strong>Total</strong><strong class="mono">'+fmtCOP(vi.total)+'</strong></div>'+
+        '</div>'+
+        '<div class="small muted" style="margin-top:8px;">Si un producto tiene lotes comprados a precios distintos, cada unidad se valora a lo que costó su lote.</div>'+
+        '<div class="row" style="margin-top:10px;gap:8px;">'+
+          '<button class="btn btn-primary" style="flex:1" data-action="exportar-valor-inventario">Compartir en Excel</button>'+
+          '<button class="btn btn-ghost" data-action="cerrar-modal">Cerrar</button>'+
+        '</div>';
     } else if(state.modal.type==='encargos'){
       var me = state.modal;
       var pend = encargosPendientes(null).slice().sort(function(a,b){
@@ -3473,6 +3512,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
     else if(action==='abrir-cobros'){ avisarCobros(true); }
+    else if(action==='abrir-valor-inventario'){ state.modal = {type:'valor-inventario'}; render(); }
+    else if(action==='exportar-valor-inventario'){
+      var vx = valorInventario();
+      var filasX = [['Producto','Stock','Costo unitario','Valor']].concat(vx.filas.map(function(f){ return [f.p.nombre, f.stock, Math.round(f.costoUnit), f.valor]; }));
+      filasX.push(['TOTAL', vx.unidades, '', vx.total]);
+      compartirArchivo(new File([csvBytes(filasX)], 'Inventario-CasaLED-'+fechaLocalISO(todayISO())+'.csv', {type:'text/csv'}));
+    }
     else if(action==='abrir-encargos'){ state.modal = {type:'encargos'}; render(); }
     else if(action==='nuevo-encargo'){ state.modal.nuevo = true; state.modal.clienteId = state.selectedClienteId || ''; render(); }
     else if(action==='cancelar-encargo'){ state.modal.nuevo = false; state.modal.texto = ''; render(); }
