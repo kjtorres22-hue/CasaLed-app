@@ -2789,6 +2789,33 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '<div class="row between" style="margin:18px 0 10px;"><h2 class="section-title" style="margin:0;">Deudores</h2>'+
         (state.isAdmin ? (function(){ var nC = cobrosPendientes().length; return '<button class="btn btn-sm '+(nC?'btn-primary':'btn-ghost')+'" data-action="abrir-cobros">🔔 Cobros pendientes'+(nC?(' ('+nC+')'):'')+'</button>'; })() : '')+'</div>'+
       '<div class="card">'+deudoresHtml+'</div>'+
+      (function(){
+        // Créditos ya pagados, con cada pago y su imagen
+        var pagadas = ventasRuta.filter(function(v){ return v.tipoPago==='credito' && !((Number(v.saldo)||0) > 0); })
+          .map(function(v){ var ult = (v.abonos||[]).reduce(function(m,a){ return String(a.fecha) > m ? String(a.fecha) : m; }, String(v.fecha)); return { v:v, ult:ult }; })
+          .sort(function(a,b){ return b.ult.localeCompare(a.ult); });
+        var htmlP = pagadas.length ? pagadas.slice(0, 60).map(function(x){
+          var v = x.v;
+          var pagos = [];
+          var inicial = recibidoPorMedio(v);
+          var montoInicial = inicial.efectivo + inicial.transferencia + inicial.sinMedio;
+          if(montoInicial > 0) pagos.push('<div class="row between small" style="padding:3px 0;"><span>'+esc(new Date(v.fecha).toLocaleDateString('es-CO'))+' · Abono al facturar · '+esc(nombreMedio(v.medioPago)||'—')+'</span>'+
+            '<span><strong>'+fmtCOP(montoInicial)+'</strong>'+(v.comprobantePartes?(' <button class="link-btn" data-action="ver-comprobante" data-id="'+v.id+'">🧾</button>'):'')+'</span></div>');
+          (v.abonos||[]).forEach(function(a, i){
+            pagos.push('<div class="row between small" style="padding:3px 0;"><span>'+esc(new Date(a.fecha).toLocaleDateString('es-CO'))+' · '+(a.medio==='transferencia'?'📲 Transferencia':'💵 Efectivo')+(a.marcado?' (marcado pagado)':'')+(a.por?(' · '+esc(a.por)):'')+'</span>'+
+              '<span><strong>'+fmtCOP(a.monto)+'</strong>'+(a.comprobante?(' <button class="link-btn" data-action="ver-comprobante-abono" data-id="'+v.id+'" data-n="'+i+'">🧾</button>'):'')+'</span></div>');
+          });
+          var sinRegistro = (Number(v.total)||0) - (Number(v.abono)||0) - (Number(v.saldo)||0);
+          if(sinRegistro > 0) pagos.push('<div class="row between small muted" style="padding:3px 0;"><span>Pagado (sin detalle registrado)</span><span><strong>'+fmtCOP(sinRegistro)+'</strong></span></div>');
+          return '<div class="list-item">'+
+            '<div class="row between"><div><span class="product-name">'+esc(v.clienteNombre||'')+'</span> <span class="small muted">#'+v.numero+'</span>'+
+              '<div class="small muted">Facturada '+esc(new Date(v.fecha).toLocaleDateString('es-CO'))+' · pagada '+esc(new Date(x.ult).toLocaleDateString('es-CO'))+'</div></div>'+
+            '<span class="mono" style="font-weight:700;color:var(--green);">'+fmtCOP(v.total)+' ✓</span></div>'+
+            '<div style="margin-top:6px;padding-left:8px;border-left:2px solid var(--border);">'+pagos.join('')+'</div>'+
+          '</div>';
+        }).join('') : '<div class="empty" style="padding:16px;">No hay deudas pagadas en esta ruta.</div>';
+        return '<h2 class="section-title">Deudas pagadas'+(pagadas.length?(' · <span class="mono">'+pagadas.length+'</span>'):'')+'</h2><div class="card">'+htmlP+'</div>';
+      })()+
       '<h2 class="section-title">Gastos'+(gastosRuta.length?(' · <span class="mono">'+fmtCOP(totalGastosF)+'</span>'):'')+'</h2><div class="card">'+gastosHistHtml+'</div>'+
       '<div class="row between" style="margin:18px 0 10px;"><h2 class="section-title" style="margin:0;">Facturas</h2>'+
         '<button class="btn btn-sm btn-ghost" data-action="abrir-soporte-dian">📑 Generar soporte DIAN</button></div>'+
