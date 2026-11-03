@@ -206,6 +206,7 @@
   .badge{ font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
   .badge-entrada{ background:rgba(52,211,153,.15); color:var(--green); }
   .badge-salida{ background:rgba(96,165,250,.15); color:var(--blue); }
+  .badge-ajuste{ background:rgba(245,158,11,.15); color:var(--amber); }
   .badge-garantia{ background:rgba(248,113,113,.15); color:var(--red); }
   .toast{
     position:fixed; bottom:150px; left:50%; transform:translateX(-50%); z-index:60; max-width:90vw; text-align:center;
@@ -340,7 +341,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -2404,6 +2405,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<span class="stock-pill '+(bajo?'stock-low':'stock-ok')+'">'+(Number(p.stock)||0)+'</span>'+
           (state.isAdmin ?
             '<button class="btn btn-sm btn-ghost" data-action="abrir-entrada" data-id="'+p.id+'">Entrada</button>'+
+            '<button class="btn btn-sm btn-ghost" data-action="abrir-ajuste" data-id="'+p.id+'" title="Ajustar stock">±</button>'+
             '<button class="btn btn-sm btn-ghost" data-action="abrir-editar-producto" data-id="'+p.id+'">✎</button>'
             : '<button class="btn btn-sm btn-ghost" data-action="abrir-entrada" data-id="'+p.id+'" style="opacity:.5">🔒 Entrada</button>')+
         '</div>'+
@@ -2701,20 +2703,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   function renderHistorial(){
-    var filtros = ['todos','entrada','salida','garantia'];
-    var etiquetas = {todos:'Todos', entrada:'Entradas', salida:'Salidas', garantia:'Garantías'};
+    var filtros = ['todos','entrada','salida','garantia','ajuste'];
+    var etiquetas = {todos:'Todos', entrada:'Entradas', salida:'Salidas', garantia:'Garantías', ajuste:'Ajustes'};
     var filtroHtml = '<div class="chips">' + filtros.map(function(f){
       return '<button class="chip'+(state.histFiltro===f?' active':'')+'" data-action="filtro-hist" data-f="'+f+'">'+etiquetas[f]+'</button>';
     }).join('') + '</div>';
 
     var movs = state.movimientos.filter(function(m){ return state.histFiltro==='todos' || m.tipo===state.histFiltro; });
-    var etiquetaMov = {entrada:'Entrada', salida:'Salida', garantia:'Garantía'};
+    var etiquetaMov = {entrada:'Entrada', salida:'Salida', garantia:'Garantía', ajuste:'Ajuste'};
     var movsHtml = !state.movAbierto ? '' : (movs.length ? movs.slice(0, 150).map(function(m){
-      var badgeClass = m.tipo==='entrada'?'badge-entrada':(m.tipo==='garantia'?'badge-garantia':'badge-salida');
-      var signo = m.tipo==='entrada' ? '+' : '-';
+      var badgeClass = m.tipo==='entrada'?'badge-entrada':(m.tipo==='garantia'?'badge-garantia':(m.tipo==='ajuste'?'badge-ajuste':'badge-salida'));
+      var signo = m.tipo==='entrada' ? '+' : (m.tipo==='ajuste' ? (m.delta>=0?'+':'−') : '-');
       return '<div class="list-item"><div class="row between">'+
         '<div><span class="badge '+badgeClass+'">'+(etiquetaMov[m.tipo]||m.tipo)+'</span> <span class="product-name" style="margin-left:6px;">'+esc(m.productoNombre)+'</span></div>'+
-        '<span class="mono" style="font-weight:700;">'+signo+m.cantidad+'</span>'+
+        '<span class="mono" style="font-weight:700;">'+signo+(m.tipo==='ajuste'?Math.abs(Number(m.delta)||0):m.cantidad)+'</span>'+
         '</div><div class="small muted" style="margin-top:3px;">'+fmtFecha(m.fecha)+(m.clienteNombre?(' · '+esc(m.clienteNombre)):'')+(m.nota?(' · '+esc(m.nota)):'')+'</div></div>';
     }).join('') : '<div class="empty">Sin movimientos.</div>');
 
@@ -3038,6 +3040,32 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-primary" style="flex:1" data-action="compartir-comprobante" '+(vc.src?'':'disabled')+'>Compartir</button>'+
           (vc.anterior ? '<button class="btn btn-ghost" style="flex:1" data-action="volver-factura">Volver</button>' : '<button class="btn btn-ghost" style="flex:1" data-action="cerrar-modal">Cerrar</button>')+
         '</div>';
+    } else if(state.modal.type==='ajuste-stock'){
+      var pa = productoById(state.modal.productoId);
+      if(!pa){ html = ''; }
+      else {
+        var conColor = pa.colores && pa.colores.length;
+        var campoA = function(etq, id, actual){
+          return '<div class="row between" style="padding:6px 0;gap:10px;">'+
+            '<div><div style="font-weight:600;">'+esc(etq)+'</div><div class="small muted">Ahora: '+fmtNum(actual)+'</div></div>'+
+            '<input id="'+id+'" class="aj-input" type="number" inputmode="numeric" min="0" value="'+actual+'" style="width:96px;text-align:center;font-size:17px;font-weight:700;">'+
+          '</div>';
+        };
+        html = '<h3>Ajustar stock · '+esc(pa.nombre)+'</h3>'+
+          '<div class="small muted" style="margin-bottom:10px;">Escribe la cantidad real que hay. No es una venta: no genera factura ni ganancia, queda como ajuste en Movimientos.</div>'+
+          '<div class="card" style="padding:6px 12px;">'+
+            (conColor ? pa.colores.map(function(c, i){ return campoA(c, 'aj-c-'+i, Number((pa.stockPorColor||{})[c])||0); }).join('') : campoA('Stock', 'aj-total', Number(pa.stock)||0))+
+          '</div>'+
+          '<label style="margin-top:10px;">Motivo</label>'+
+          '<div class="chips" style="margin-bottom:8px;flex-wrap:wrap;">'+
+            ['Conteo físico','Dañado','Uso propio','Muestra / regalo','Otro'].map(function(m){ return '<button class="chip'+(state.modal.motivo===m?' active':'')+'" data-action="aj-motivo" data-m="'+esc(m)+'">'+esc(m)+'</button>'; }).join('')+
+          '</div>'+
+          '<div class="field"><label>Nota (opcional)</label><input id="aj-nota" value="'+esc(state.modal.nota||'')+'" placeholder="Ej: se quemaron 2 en bodega"></div>'+
+          '<div class="row" style="margin-top:10px;gap:8px;">'+
+            '<button class="btn btn-primary" style="flex:1;padding:13px;" data-action="guardar-ajuste">Guardar ajuste</button>'+
+            '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
+          '</div>';
+      }
     } else if(state.modal.type==='valor-inventario'){
       var vi = valorInventario();
       html = '<h3>💰 Balance del inventario</h3>'+
@@ -3512,6 +3540,39 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
     else if(action==='abrir-cobros'){ avisarCobros(true); }
+    else if(action==='abrir-ajuste'){ state.modal = { type:'ajuste-stock', productoId:id, motivo:'Conteo físico', nota:'' }; render(); }
+    else if(action==='aj-motivo'){ state.modal.motivo = t.getAttribute('data-m'); var nA = document.getElementById('aj-nota'); if(nA) state.modal.nota = nA.value; render({preservar:true}); }
+    else if(action==='guardar-ajuste'){
+      var pAj = productoById(state.modal.productoId); if(!pAj) return;
+      var notaAj = (document.getElementById('aj-nota').value||'').trim();
+      var motivoAj = state.modal.motivo || 'Ajuste';
+      var bAj = writeBatch(fs); var args = []; var deltaTotal = 0; var cambios = [];
+      if(pAj.colores && pAj.colores.length){
+        pAj.colores.forEach(function(c, i){
+          var nuevo = Math.max(0, Math.floor(Number(document.getElementById('aj-c-'+i).value)||0));
+          var antes = Number((pAj.stockPorColor||{})[c])||0;
+          var d = nuevo - antes;
+          if(d){ args.push(new FieldPath('stockPorColor', c), increment(d)); deltaTotal += d; cambios.push({color:c, antes:antes, despues:nuevo, d:d}); }
+        });
+      } else {
+        var nuevoT = Math.max(0, Math.floor(Number(document.getElementById('aj-total').value)||0));
+        var antesT = Number(pAj.stock)||0;
+        if(nuevoT !== antesT){ deltaTotal = nuevoT - antesT; cambios.push({color:null, antes:antesT, despues:nuevoT, d:deltaTotal}); }
+      }
+      if(!cambios.length){ toast('No cambiaste ninguna cantidad'); return; }
+      if(deltaTotal) args.unshift(new FieldPath('stock'), increment(deltaTotal));
+      bAj.update(doc(fs, 'productos/'+pAj.id), ...args);
+      cambios.forEach(function(c){
+        bAj.set(doc(collection(fs,'movimientos')), {
+          tipo:'ajuste', productoId:pAj.id, productoNombre:pAj.nombre+(c.color?(' - '+c.color):''), cantidad:Math.abs(c.d), delta:c.d,
+          antes:c.antes, despues:c.despues, nota:motivoAj+(notaAj?(' · '+notaAj):''), fecha:todayISO(),
+          usuarioId:state.auth.user.uid, usuarioNombre:nombreUsuario()
+        });
+      });
+      enSegundoPlano(bAj.commit());
+      state.modal = null; render();
+      toast('Stock ajustado ('+(deltaTotal>=0?'+':'')+deltaTotal+')');
+    }
     else if(action==='abrir-valor-inventario'){ state.modal = {type:'valor-inventario'}; render(); }
     else if(action==='exportar-valor-inventario'){
       var vx = valorInventario();
@@ -4005,6 +4066,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var cabMap = {'rc-proveedor':'proveedor','rc-numero':'numero','rc-fecha':'fecha','rc-total':'total'};
       if(cabMap[e.target.id]){ state.modal.cab[cabMap[e.target.id]] = e.target.id==='rc-total' ? (Number(e.target.value)||0) : e.target.value; return; }
     }
+    if(e.target.id==='aj-nota' && state.modal && state.modal.type==='ajuste-stock'){ state.modal.nota = e.target.value; return; }
     if(e.target.id==='ab-monto' && state.modal && state.modal.type==='abono'){ state.modal.monto = e.target.value; return; }
     if(e.target.id==='rf-comentarios'){ state.checkoutComentarios = e.target.value; return; }
     if(e.target.id==='rf-transf'){
