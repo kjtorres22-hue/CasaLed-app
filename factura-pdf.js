@@ -579,8 +579,10 @@ export async function generarPedidoPDF(datos){
   pdf.text('Fecha', xF + 8, 58, { size: 8.5, bold: true, color: GRIS });
   pdf.text(fechaTxt, xF + wF - 8, 58, { size: 9.5, bold: true, align: 'right' });
   pdf.stroke(LINEA); pdf.lineWidth(0.8); pdf.rect(xF, 22, wF, 42, 'S');
-  pdf.text('Por favor enviar exactamente las referencias de este pedido (revisar el código de cada artículo).', M, 108, { size: 9, color: AZUL, bold: true });
-  let y = 118;
+  const yIns = datos.proveedor ? 118 : 108;
+  if(datos.proveedor) pdf.text('Para: ' + datos.proveedor, M, 102, { size: 11, bold: true, color: NEGRO });
+  pdf.text('Por favor enviar exactamente las referencias de este pedido (revisar el código de cada artículo).', M, yIns, { size: 9, color: AZUL, bold: true });
+  let y = yIns + 10;
 
   const C = [{ t: 'FOTO', w: 60, a: 'center' }, { t: 'CÓDIGO', w: 120, a: 'left' }, { t: 'ARTÍCULO', w: 0, a: 'left' }, { t: 'CANTIDAD', w: 90, a: 'center' }];
   C[2].w = ANCHO - C.reduce((s, c) => s + c.w, 0);
