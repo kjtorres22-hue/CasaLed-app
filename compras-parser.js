@@ -311,12 +311,26 @@ export async function pdfAImagenes(datos, opciones){
 
 // ---------- Lectura de facturas con IA (Gemini, plan gratuito de Google AI Studio) ----------
 var GEMINI = 'https://generativelanguage.googleapis.com/v1beta/';
+// Envía la clave en el encabezado x-goog-api-key (sirve para claves AIza… y las nuevas AQ.…);
+// si Google la rechaza así, reintenta con ?key= en la dirección.
+async function pedirGemini(ruta, clave, opciones){
+  opciones = opciones || {};
+  var hdr = Object.assign({}, opciones.headers || {}, { 'x-goog-api-key': clave });
+  var r = null;
+  try{ r = await fetch(GEMINI + ruta, Object.assign({}, opciones, { headers: hdr })); }catch(e){ r = null; }
+  if(r && r.ok) return r;
+  var r2 = null;
+  try{ r2 = await fetch(GEMINI + ruta + (ruta.indexOf('?') > -1 ? '&' : '?') + 'key=' + encodeURIComponent(clave), opciones); }catch(e){ r2 = null; }
+  if(r2 && (r2.ok || !r)) return r2;
+  if(r) return r;
+  throw { code:'gemini', message:'No hay conexión con Google. Revisa tu internet.' };
+}
 function versionModelo(nombre){
   var m = String(nombre).match(/(\d+(?:\.\d+)?)/); return m ? Number(m[1]) : 0;
 }
 // Busca el mejor modelo "flash" disponible para esta clave (los nombres cambian con el tiempo)
 export async function elegirModeloGemini(clave){
-  var r = await fetch(GEMINI + 'models?pageSize=200&key=' + encodeURIComponent(clave));
+  var r = await pedirGemini('models?pageSize=200', clave);
   var j = await r.json().catch(function(){ return {}; });
   if(!r.ok) throw { code:'gemini', status:r.status, message:(j.error && j.error.message) || ('Error ' + r.status) };
   var modelos = (j.models || []).filter(function(m){
@@ -356,7 +370,7 @@ export async function leerFacturaConIA(datos, mime, clave, modelo){
     contents: [{ role:'user', parts: [ { text: PROMPT_FACTURA }, { inline_data: { mime_type: mime, data: aBase64(bytes) } } ] }],
     generationConfig: { temperature: 0, responseMimeType: 'application/json' }
   };
-  var r = await fetch(GEMINI + 'models/' + encodeURIComponent(modelo) + ':generateContent?key=' + encodeURIComponent(clave), {
+  var r = await pedirGemini('models/' + encodeURIComponent(modelo) + ':generateContent', clave, {
     method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(cuerpo)
   });
   var j = await r.json().catch(function(){ return {}; });
