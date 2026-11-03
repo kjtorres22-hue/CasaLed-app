@@ -283,7 +283,7 @@
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
 import { generarFacturaPDF, generarSoporteDIAN, generarPedidoPDF, TITULO_DOC } from './factura-pdf.js';
-import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes } from './compras-parser.js';
+import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -336,12 +336,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     jornadas: [],
     compras: [],
     encargos: [],
+    ia: null,
     contaMes: null,
     importando: false,
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -591,6 +592,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       render({preservar:true});
     });
     if(state.isAdmin){
+      unsub.push(onSnapshot(doc(fs, 'privado/ia'), function(ds){ state.ia = ds.exists() ? ds.data() : null; render({preservar:true}); }, function(){ state.ia = null; }));
       db.collection('compras').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
         state.compras = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
         render({preservar:true});
@@ -1712,10 +1714,19 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     state.modal.leyendo = true; state.modal.error = ''; render();
     try{
       var res, archivo = entrada.file || null, esFoto = false;
+      var claveIA = state.isAdmin && state.ia && state.ia.clave;
       if(archivo && (/pdf/i.test(archivo.type) || /\.pdf$/i.test(archivo.name||''))){
-        res = parsearFactura(await leerPDF(await archivo.arrayBuffer()));
+        var bufPdf = await archivo.arrayBuffer();
+        res = parsearFactura(await leerPDF(bufPdf.slice(0)));
+        // PDF escaneado (sin texto): se lo pasamos a la IA
+        if(!res.lineas.length && claveIA){ state.modal.leyendoIA = true; render(); res = await leerConIA(new Uint8Array(bufPdf), 'application/pdf'); }
       } else if(archivo && /^image\//.test(archivo.type)){
-        esFoto = true; res = { proveedor:'', numero:'', fecha:'', total:0, lineas:[], suma:0 };
+        esFoto = true;
+        if(claveIA){
+          state.modal.leyendoIA = true; render();
+          var dataUrlIA = await reducirImagen(archivo, 2000, 0.85);
+          res = await leerConIA(base64ABytes(dataUrlIA.split(',')[1]), 'image/jpeg');
+        } else res = { proveedor:'', numero:'', fecha:'', total:0, lineas:[], suma:0 };
       } else {
         var texto = entrada.texto != null ? entrada.texto : (archivo ? await archivo.text() : '');
         if(!String(texto).trim()){ throw {code:'vacio'}; }
@@ -1731,15 +1742,32 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var dup = buscarCompraDuplicada(res.proveedor, res.numero);
       state.modal = {
         type:'revisar-compra', archivo:archivo, esFoto:esFoto, duplicada:dup,
-        cab:{ proveedor:res.proveedor || (dup&&dup.proveedor) || '', numero:res.numero||'', fecha:res.fecha||fechaLocalISO(todayISO()), total:res.total||res.suma||0 },
+        cab:{ proveedor:res.proveedor || (dup&&dup.proveedor) || '', numero:res.numero||'', fecha:res.fecha||fechaLocalISO(todayISO()), total:res.total||res.suma||0,
+          datos: Object.assign({ nit:'', telefono:'', direccion:'', ciudad:'', correo:'' }, (dup && dup.proveedorDatos) || {}, res.proveedorDatos || {}) },
+        porIA: !!res.porIA,
         suma:res.suma, lineas:lineas, actualizarCostos: lineas.length>0, sumarStock: lineas.length>0 && !dup
       };
       render();
     }catch(err){
       console.error(err);
+      if(err && err.code==='gemini'){ state.modal = {type:'pegar-compra', error:'La IA no pudo leer la factura: '+(err.status===429?'se acabó el cupo gratis por ahora, intenta más tarde.':(err.status===400||err.status===403?'revisa la clave de Gemini en Historial → Lectura con IA.':(err.message||'error desconocido')))}; render(); return; }
       state.modal = {type:'pegar-compra', error: err && err.code==='vacio' ? 'No llegó nada. Copia la factura y vuelve a intentar.' :
         'No pude leer ese archivo. Prueba copiando el texto de la factura y pegándolo aquí.'};
       render();
+    }
+  }
+  // Lee una foto o PDF escaneado con Gemini; elige el modelo la primera vez y lo recuerda
+  async function leerConIA(bytes, mime){
+    var ia = state.ia || {};
+    var modelo = ia.modelo;
+    if(!modelo){ modelo = await elegirModeloGemini(ia.clave); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:modelo }, {merge:true})); }
+    try{ return await leerFacturaConIA(bytes, mime, ia.clave, modelo); }
+    catch(e){
+      if(e && e.code==='gemini' && e.status===404){
+        modelo = await elegirModeloGemini(ia.clave); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:modelo }, {merge:true}));
+        return await leerFacturaConIA(bytes, mime, ia.clave, modelo);
+      }
+      throw e;
     }
   }
   async function pegarDesdePortapapeles(){
@@ -1840,6 +1868,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       b.update(doc(fs, 'config/general'), ...margs); ops++;
     }
     var datosCompra = { proveedor:String(cab.proveedor).trim(), numero:String(cab.numero||'').trim(), fecha:cab.fecha, total:Number(cab.total)||0,
+      proveedorDatos: (function(d){ d = d || {}; return { nit:String(d.nit||'').trim(), telefono:String(d.telefono||'').trim(), direccion:String(d.direccion||'').trim(), ciudad:String(d.ciudad||'').trim(), correo:String(d.correo||'').trim() }; })(cab.datos),
+      leidaConIA: !!m.porIA,
       items:items, aplicada:{ costos:!!m.actualizarCostos, inventario:!!m.sumarStock, en:todayISO(), por:nombreUsuario() } };
     if(!m.duplicada){ datosCompra.creadoEn = todayISO(); datosCompra.partes = 0; datosCompra.notas = ''; }
     b.set(doc(fs, 'compras/'+cid), datosCompra, {merge:true}); ops++;
@@ -2563,7 +2593,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var comprasHtml = state.compras.length ? state.compras.map(function(c){
       return '<div class="list-item"><div class="row between">'+
         '<div><span class="product-name">'+esc(c.proveedor||'Proveedor')+'</span>'+(c.numero?(' <span class="muted small">N.° '+esc(c.numero)+'</span>'):'')+
-          '<div class="small muted">'+esc(c.fecha||'')+' · '+fmtCOP(c.total)+(c.partes?' · 📎 '+(String(c.tipoArchivo||'').indexOf('pdf')>-1?'PDF':'Foto'):' · <span style="color:var(--red);">sin archivo</span>')+'</div></div>'+
+          '<div class="small muted">'+esc(c.fecha||'')+' · '+fmtCOP(c.total)+(c.partes?' · 📎 '+(String(c.tipoArchivo||'').indexOf('pdf')>-1?'PDF':'Foto'):' · <span style="color:var(--red);">sin archivo</span>')+'</div>'+
+          ((c.proveedorDatos && (c.proveedorDatos.nit || c.proveedorDatos.telefono)) ? '<div class="small muted">'+[c.proveedorDatos.nit?('NIT '+esc(c.proveedorDatos.nit)):'', c.proveedorDatos.telefono?('<a href="tel:'+esc(c.proveedorDatos.telefono)+'">📞 '+esc(c.proveedorDatos.telefono)+'</a>'):''].filter(Boolean).join(' · ')+'</div>' : '')+
+        '</div>'+
         '<div class="row">'+
           (c.partes ? '<button class="btn btn-sm btn-ghost" data-action="ver-compra" data-id="'+c.id+'">Ver</button>' :
             '<button class="btn btn-sm btn-primary" data-action="adjuntar-compra" data-id="'+c.id+'">Adjuntar</button>')+
@@ -2882,7 +2914,17 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         })()+
         (state.isAdmin ? '<button class="btn btn-ghost btn-block" data-action="leer-rut">📄 '+((state.config && state.config.rut)?'Actualizar RUT (PDF)':'Subir RUT (PDF)')+'</button>'+
           '<input id="rut-input" type="file" accept="application/pdf" style="display:none;">' : '')+
-      '</div>';
+      '</div>'+
+      (state.isAdmin ? ('<h2 class="section-title">Lectura de facturas con IA</h2>'+
+      '<div class="card">'+
+        (state.ia && state.ia.clave
+          ? '<div class="small" style="margin-bottom:10px;"><span style="color:var(--green);font-weight:700;">✓ Activa</span> · Gemini'+(state.ia.modelo?(' ('+esc(state.ia.modelo)+')'):'')+' · clave terminada en …'+esc(String(state.ia.clave).slice(-4))+'</div>'+
+            '<button class="btn btn-ghost btn-block" data-action="quitar-clave-ia">Quitar clave</button>'
+          : '<div class="small muted" style="margin-bottom:10px;">Con una clave gratuita de Google AI Studio, la app lee fotos de facturas de compra (y PDF escaneados): productos, cantidades, precios y datos del proveedor.</div>'+
+            '<div class="field"><label>Clave de Gemini (API key)</label><input id="cfg-clave-ia" type="password" autocomplete="off" placeholder="AIza…"></div>'+
+            '<button class="btn btn-primary btn-block" data-action="guardar-clave-ia">Guardar y probar</button>')+
+        '<div class="small muted" style="margin-top:8px;">La clave queda guardada solo para tu cuenta de administrador. En el plan gratis de Google, lo que se envía puede usarse para mejorar sus productos.</div>'+
+      '</div>') : '');
   }
 
   function clienteCheckout(){
@@ -3188,14 +3230,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     } else if(state.modal.type==='pegar-compra'){
       var pm = state.modal;
       html = '<h3>Agregar factura de compra</h3>'+
-        (pm.leyendo ? '<div class="empty" style="padding:26px 10px;">Leyendo la factura…</div>' :
+        (pm.leyendo ? '<div class="empty" style="padding:26px 10px;">'+(pm.leyendoIA?'🤖 La IA está leyendo la factura… puede tardar unos segundos.':'Leyendo la factura…')+'</div>' :
         '<div class="small muted" style="margin-bottom:10px;">Copia la factura (el PDF o su texto) y pégala aquí. La app lee los productos, actualiza los costos y suma las cantidades al inventario. Antes de guardar puedes revisar todo.</div>'+
         '<div id="zona-pegar" class="zona-pegar" contenteditable="true" data-ph="Toca aquí y elige «Pegar»"></div>'+
         (pm.error ? '<div class="small" style="color:var(--red);margin-top:8px;">'+esc(pm.error)+'</div>' : '')+
         '<button class="btn btn-primary btn-block" style="margin-top:12px;padding:13px;" data-action="pegar-compra-portapapeles">📋 Pegar lo que copié</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="elegir-archivo-compra">📎 Elegir archivo (PDF o foto)</button>'+
         '<input id="compra-pegar-input" type="file" accept="application/pdf,image/*,text/plain" style="display:none;">'+
-        '<div class="small muted" style="margin-top:12px;">Si es una foto, se guarda en la carpeta pero los productos no se pueden leer: para eso pega el PDF o el texto.</div>'+
+        (state.ia && state.ia.clave ? '<div class="small muted" style="margin-top:12px;">🤖 Las fotos de facturas las lee la IA (Gemini). Toma la foto derecha y con buena luz.</div>'
+          : '<div class="small muted" style="margin-top:12px;">Si es una foto, se guarda en la carpeta pero los productos no se pueden leer. Para que la app lea fotos, activa la lectura con IA en Historial → Lectura de facturas con IA.</div>')+''+
         '<div class="row" style="margin-top:12px;"><button class="btn btn-ghost" style="flex:1" data-action="compra-solo-archivar">Solo archivar (sin productos)</button>'+
         '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button></div>');
     } else if(state.modal.type==='revisar-compra'){
@@ -3236,7 +3279,17 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         (rm2.duplicada ? '<div class="small" style="background:rgba(245,158,11,.12);border:1px solid var(--amber);border-radius:10px;padding:10px;margin-bottom:12px;">Esta factura ya estaba registrada'+
           (rm2.duplicada.aplicada && rm2.duplicada.aplicada.inventario ? ' <strong>y su mercancía ya se sumó al inventario</strong>' : '')+
           '. «Sumar al inventario» quedó apagado para no contar dos veces; los costos sí se pueden actualizar.</div>' : '')+
+        (rm2.porIA ? '<div class="small" style="background:rgba(43,140,255,.10);border:1px solid var(--blue);border-radius:10px;padding:10px;margin-bottom:12px;">🤖 Leída con IA. Revisa cantidades y precios antes de guardar: la IA se puede equivocar.</div>' : '')+
         '<div class="field"><label>Proveedor</label><input id="rc-proveedor" value="'+esc(cab.proveedor||'')+'"></div>'+
+        (function(){
+          var d = cab.datos || {};
+          var campoP = function(id, etq, val, extra){ return '<div class="field" style="margin-bottom:8px;"><label>'+etq+'</label><input id="'+id+'" value="'+esc(val||'')+'" '+(extra||'')+'></div>'; };
+          return '<details style="margin:-4px 0 10px;"'+((d.nit||d.telefono||d.direccion||d.correo)?' open':'')+'><summary class="small" style="cursor:pointer;color:var(--blue);font-weight:700;">Datos del proveedor</summary>'+
+            '<div class="field-row" style="margin-top:8px;">'+campoP('rc-pnit','NIT',d.nit)+campoP('rc-ptel','Teléfono',d.telefono,'inputmode="tel"')+'</div>'+
+            campoP('rc-pdir','Dirección',d.direccion)+
+            '<div class="field-row">'+campoP('rc-pciu','Ciudad',d.ciudad)+campoP('rc-pcor','Correo',d.correo,'inputmode="email"')+'</div>'+
+          '</details>';
+        })()+
         '<div class="field-row">'+
           '<div class="field"><label>N.° factura</label><input id="rc-numero" value="'+esc(cab.numero||'')+'"></div>'+
           '<div class="field"><label>Fecha</label><input id="rc-fecha" type="date" value="'+esc(cab.fecha||'')+'"></div>'+
@@ -3540,6 +3593,20 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
     else if(action==='nueva-compra' || action==='compra-solo-archivar'){ state.modal = {type:'compra', compra:{}}; render(); }
     else if(action==='abrir-cobros'){ avisarCobros(true); }
+    else if(action==='guardar-clave-ia'){
+      var claveN = (document.getElementById('cfg-clave-ia').value||'').trim();
+      if(!claveN){ toast('Pega la clave de Gemini'); return; }
+      toast('Probando la clave…');
+      try{
+        var modeloN = await elegirModeloGemini(claveN);
+        await setDoc(doc(fs, 'privado/ia'), { clave:claveN, modelo:modeloN, guardadaEn:todayISO() });
+        toast('Listo ✓ La IA (' + modeloN + ') ya lee fotos de facturas');
+      }catch(eK){ console.error(eK); toast('La clave no funcionó: '+((eK && eK.message) || 'revísala')); }
+    }
+    else if(action==='quitar-clave-ia'){
+      if(!confirm('¿Quitar la clave de Gemini? Las fotos de facturas ya no se leerán.')) return;
+      enSegundoPlano(deleteDoc(doc(fs, 'privado/ia'))); state.ia = null; render();
+    }
     else if(action==='abrir-ajuste'){ state.modal = { type:'ajuste-stock', productoId:id, motivo:'Conteo físico', nota:'' }; render(); }
     else if(action==='aj-motivo'){ state.modal.motivo = t.getAttribute('data-m'); var nA = document.getElementById('aj-nota'); if(nA) state.modal.nota = nA.value; render({preservar:true}); }
     else if(action==='guardar-ajuste'){
@@ -4063,6 +4130,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         if(campoI==='stock' || campoI==='costo'){ state.modal.lineas[Number(liI)][campoI] = Number(e.target.value)||0; }
         return;
       }
+      var datMap = {'rc-pnit':'nit','rc-ptel':'telefono','rc-pdir':'direccion','rc-pciu':'ciudad','rc-pcor':'correo'};
+      if(datMap[e.target.id]){ state.modal.cab.datos = state.modal.cab.datos || {}; state.modal.cab.datos[datMap[e.target.id]] = e.target.value; return; }
       var cabMap = {'rc-proveedor':'proveedor','rc-numero':'numero','rc-fecha':'fecha','rc-total':'total'};
       if(cabMap[e.target.id]){ state.modal.cab[cabMap[e.target.id]] = e.target.id==='rc-total' ? (Number(e.target.value)||0) : e.target.value; return; }
     }

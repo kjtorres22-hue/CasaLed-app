@@ -202,6 +202,29 @@ export function parsearFactura(paginas){
   });
   r.lineas = lineas;
   r.suma = lineas.reduce(function(s, l){ return s + (l.repetida ? 0 : l.subtotal); }, 0);
+  // Datos del proveedor: se buscan en el encabezado (antes de los datos del cliente)
+  var enc = [];
+  for(var e = 0; e < todas.length && e < 14; e++){
+    var tx = todas[e].celdas.join(' ');
+    if(/\b(cliente|se[ñn]or(es)?|adquiriente|comprador)\b/i.test(tx)) break;
+    enc.push(tx);
+  }
+  var encT = enc.join('\n');
+  var pd = { nit:'', telefono:'', direccion:'', ciudad:'', correo:'' };
+  var mNit = encT.match(/NIT[^\d]{0,6}([\d.]{6,15}(?:\s*-\s*\d)?)/i) || encT.match(/\b([89]\d{8}(?:-\d)?)\b/);
+  if(mNit) pd.nit = mNit[1].replace(/\s+/g, '');
+  var mTel = encT.match(/\b(3\d{9}|60\d{8})\b/);
+  if(mTel) pd.telefono = mTel[1];
+  var mCor = encT.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+  if(mCor) pd.correo = mCor[0];
+  // dirección: la celda del encabezado que empieza como dirección (CL, CRA, AV…)
+  for(var e2 = 0; e2 < Math.min(todas.length, enc.length) && !pd.direccion; e2++){
+    todas[e2].celdas.forEach(function(c){
+      if(!pd.direccion && /^(?:direcci[oó]n:?\s*)?(CL|CALLE|CRA|CR|KR|CARRERA|AV|AVENIDA|DG|DIAGONAL|TV|TRANSVERSAL|MZ)\.?\s+\S/i.test(c.trim()))
+        pd.direccion = c.trim().replace(/^direcci[oó]n:?\s*/i, '').replace(/\s+(TEL|NIT|IVA|CEL|ASESOR)\b.*$/i, '').replace(/\s+\d{7,}.*$/, '').trim();
+    });
+  }
+  r.proveedorDatos = pd;
   return r;
 }
 
@@ -284,4 +307,82 @@ export async function pdfAImagenes(datos, opciones){
   }
   try{ documento.destroy(); }catch(e){}
   return imagenes;
+}
+
+// ---------- Lectura de facturas con IA (Gemini, plan gratuito de Google AI Studio) ----------
+var GEMINI = 'https://generativelanguage.googleapis.com/v1beta/';
+function versionModelo(nombre){
+  var m = String(nombre).match(/(\d+(?:\.\d+)?)/); return m ? Number(m[1]) : 0;
+}
+// Busca el mejor modelo "flash" disponible para esta clave (los nombres cambian con el tiempo)
+export async function elegirModeloGemini(clave){
+  var r = await fetch(GEMINI + 'models?pageSize=200&key=' + encodeURIComponent(clave));
+  var j = await r.json().catch(function(){ return {}; });
+  if(!r.ok) throw { code:'gemini', status:r.status, message:(j.error && j.error.message) || ('Error ' + r.status) };
+  var modelos = (j.models || []).filter(function(m){
+    var n = String(m.name || '');
+    return (m.supportedGenerationMethods || []).indexOf('generateContent') !== -1 && /flash/i.test(n)
+      && !/(image|tts|audio|live|embedding|thinking-exp|native)/i.test(n);
+  }).map(function(m){ return String(m.name).replace(/^models\//, ''); });
+  if(!modelos.length) throw { code:'gemini', message:'Tu clave no tiene modelos Gemini Flash disponibles.' };
+  modelos.sort(function(a, b){
+    var pa = /preview|exp/i.test(a) ? 1 : 0, pb = /preview|exp/i.test(b) ? 1 : 0;
+    var la = /lite/i.test(a) ? 1 : 0, lb = /lite/i.test(b) ? 1 : 0;
+    return (pa - pb) || (la - lb) || (versionModelo(b) - versionModelo(a));
+  });
+  return modelos[0];
+}
+
+var PROMPT_FACTURA = 'Eres un asistente que lee facturas de compra colombianas (pesos colombianos). ' +
+  'Lee la imagen o el documento y devuelve SOLO un JSON con esta forma exacta:\n' +
+  '{"proveedor":{"nombre":"","nit":"","telefono":"","direccion":"","ciudad":"","correo":""},' +
+  '"numero":"","fecha":"AAAA-MM-DD","total":0,' +
+  '"items":[{"codigo":"","descripcion":"","cantidad":0,"precio_unitario":0,"subtotal":0}]}\n' +
+  'Reglas: el proveedor es quien VENDE (no el cliente). Los números van sin puntos de miles ni signo $ (ej. 1530000). ' +
+  'En Colombia el punto separa miles y la coma los decimales ("1.530.000" = 1530000; "20,00" = 20). ' +
+  'precio_unitario es el precio por unidad con IVA si la factura lo trae incluido. ' +
+  'Incluye todos los renglones de productos, una sola vez cada uno (si una fila se repite por salto de página, no la dupliques). ' +
+  'Si un dato no aparece, deja "" o 0. No inventes datos.';
+
+function aBase64(bytes){
+  var bin = '', paso = 0x8000;
+  for(var i = 0; i < bytes.length; i += paso){ bin += String.fromCharCode.apply(null, bytes.subarray(i, i + paso)); }
+  return btoa(bin);
+}
+// datos: Uint8Array o ArrayBuffer · mime: image/jpeg, application/pdf…
+export async function leerFacturaConIA(datos, mime, clave, modelo){
+  var bytes = datos instanceof Uint8Array ? datos : new Uint8Array(datos);
+  var cuerpo = {
+    contents: [{ role:'user', parts: [ { text: PROMPT_FACTURA }, { inline_data: { mime_type: mime, data: aBase64(bytes) } } ] }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json' }
+  };
+  var r = await fetch(GEMINI + 'models/' + encodeURIComponent(modelo) + ':generateContent?key=' + encodeURIComponent(clave), {
+    method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(cuerpo)
+  });
+  var j = await r.json().catch(function(){ return {}; });
+  if(!r.ok) throw { code:'gemini', status:r.status, message:(j.error && j.error.message) || ('Error ' + r.status) };
+  var texto = (((j.candidates || [])[0] || {}).content || {}).parts;
+  texto = (texto || []).map(function(p){ return p.text || ''; }).join('');
+  var limpio = texto.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  var obj;
+  try{ obj = JSON.parse(limpio); }catch(e){ throw { code:'gemini', message:'La IA no devolvió datos legibles. Intenta con una foto más clara.' }; }
+  var num = function(v){ if(typeof v === 'number') return v; var n = numeroCO(String(v || '').replace(/[^\d.,]/g, '')); return n == null ? 0 : n; };
+  var items = (obj.items || []).map(function(it){
+    var q = num(it.cantidad), p = num(it.precio_unitario), t = num(it.subtotal);
+    if(!t && q && p) t = Math.round(q * p);
+    if(!p && q && t) p = Math.round(t / q);
+    return { codigo: String(it.codigo || '').trim().toUpperCase(), descripcion: String(it.descripcion || '').trim(), cantidad: q, precio: p, subtotal: t };
+  }).filter(function(l){ return l.cantidad > 0 && (l.precio > 0 || l.subtotal > 0); });
+  var prov = obj.proveedor || {};
+  var fecha = String(obj.fecha || '');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(fecha)){
+    var mf = fecha.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/);
+    fecha = mf ? ((mf[3].length === 2 ? '20' + mf[3] : mf[3]) + '-' + String(mf[2]).padStart(2, '0') + '-' + String(mf[1]).padStart(2, '0')) : '';
+  }
+  return {
+    proveedor: String(prov.nombre || '').trim(),
+    proveedorDatos: { nit: String(prov.nit || '').trim(), telefono: String(prov.telefono || '').trim(), direccion: String(prov.direccion || '').trim(), ciudad: String(prov.ciudad || '').trim(), correo: String(prov.correo || '').trim() },
+    numero: String(obj.numero || '').trim(), fecha: fecha, total: num(obj.total),
+    lineas: items, suma: items.reduce(function(s, l){ return s + l.subtotal; }, 0), porIA: true
+  };
 }
