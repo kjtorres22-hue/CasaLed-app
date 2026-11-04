@@ -283,7 +283,7 @@
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
 import { generarFacturaPDF, generarSoporteDIAN, generarPedidoPDF, TITULO_DOC } from './factura-pdf.js';
-import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini, listarModelosGemini, familiaModelo } from './compras-parser.js';
+import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini, listarModelosGemini, familiaModelo, MODELO_PREFERIDO } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -1760,23 +1760,17 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
   }
   // Lee una foto o PDF escaneado con Gemini; elige el modelo la primera vez y lo recuerda
-  // Lee con Gemini. Si el modelo guardado está saturado o ya no existe, busca otro que sí responda,
-  // lo deja guardado para las próximas facturas y reintenta.
+  // Lee con Gemini: siempre empieza con el modelo predeterminado (gemini-3.6-flash).
+  // Si ese no responde, busca otro que sí responda solo para esta factura.
   async function leerConIA(bytes, mime){
     var ia = state.ia || {};
-    var modelo = ia.modelo;
     var falla = function(e){ return e && e.code==='gemini' && (e.status===503 || e.status===500 || e.status===429 || e.status===404 || /high demand|overloaded|unavailable/i.test(e.message||'')); };
-    var guardar = function(m){ state.ia = Object.assign({}, state.ia, { modelo:m }); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:m }, {merge:true})); };
-    var evitar = [];
-    if(modelo){
-      try{ return await leerFacturaConIA(bytes, mime, ia.clave, modelo); }
-      catch(e){ if(!falla(e)) throw e; evitar.push(familiaModelo(modelo)); }
-    }
-    if(state.modal){ state.modal.reintento = modelo ? ('El modelo '+modelo+' no responde; buscando otro modelo de Gemini…') : 'Buscando un modelo de Gemini disponible…'; render(); }
-    var nuevo = await elegirModeloGemini(ia.clave, evitar);
-    guardar(nuevo);
-    if(state.modal){ state.modal.reintento = 'Leyendo con '+nuevo+'…'; render(); }
-    return await leerFacturaConIA(bytes, mime, ia.clave, nuevo);
+    try{ return await leerFacturaConIA(bytes, mime, ia.clave, MODELO_PREFERIDO); }
+    catch(e){ if(!falla(e)) throw e; }
+    if(state.modal){ state.modal.reintento = MODELO_PREFERIDO+' no responde ahora; probando otro modelo de Gemini…'; render(); }
+    var otro = await elegirModeloGemini(ia.clave, [familiaModelo(MODELO_PREFERIDO)]);
+    if(state.modal){ state.modal.reintento = 'Leyendo con '+otro+'…'; render(); }
+    return await leerFacturaConIA(bytes, mime, ia.clave, otro);
   }
   async function pegarDesdePortapapeles(){
     try{
@@ -3133,7 +3127,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       (state.isAdmin ? ('<h2 class="section-title">Lectura de facturas con IA</h2>'+
       '<div class="card">'+
         (state.ia && state.ia.clave
-          ? '<div class="small" style="margin-bottom:10px;"><span style="color:var(--green);font-weight:700;">✓ Activa</span> · Gemini'+(state.ia.modelo?(' ('+esc(state.ia.modelo)+')'):'')+' · clave terminada en …'+esc(String(state.ia.clave).slice(-4))+'</div>'+
+          ? '<div class="small" style="margin-bottom:10px;"><span style="color:var(--green);font-weight:700;">✓ Activa</span> · '+esc(MODELO_PREFERIDO)+' · clave terminada en …'+esc(String(state.ia.clave).slice(-4))+'</div>'+
             '<button class="btn btn-ghost btn-block" data-action="quitar-clave-ia">Quitar clave</button>'
           : '<div class="small muted" style="margin-bottom:10px;">Con una clave gratuita de Google AI Studio, la app lee fotos de facturas de compra (y PDF escaneados): productos, cantidades, precios y datos del proveedor.</div>'+
             '<div class="field"><label>Clave de Gemini (API key)</label><input id="cfg-clave-ia" type="password" autocomplete="off" placeholder="AIza… o AQ.…"></div>'+

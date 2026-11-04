@@ -328,6 +328,8 @@ async function pedirGemini(ruta, clave, opciones){
 function versionModelo(nombre){
   var m = String(nombre).match(/(\d+(?:\.\d+)?)/); return m ? Number(m[1]) : 0;
 }
+// Modelo predeterminado (el que mejor ha leído las facturas). Si falla, se prueban los demás.
+export var MODELO_PREFERIDO = 'gemini-3.6-flash';
 // Familia de un modelo: versión + si es lite (gemini-3.8-flash y gemini-3.8-flash-001 son la misma)
 export function familiaModelo(m){ return versionModelo(m) + (/lite/i.test(m) ? '-lite' : ''); }
 // Todos los modelos Flash útiles, del mejor al menos preferido.
@@ -343,6 +345,8 @@ export async function listarModelosGemini(clave){
   }).map(function(m){ return String(m.name).replace(/^models\//, ''); });
   if(!modelos.length) throw { code:'gemini', message:'Tu clave no tiene modelos Gemini Flash disponibles.' };
   modelos.sort(function(a, b){
+    var fa = a === MODELO_PREFERIDO ? 0 : 1, fb = b === MODELO_PREFERIDO ? 0 : 1;
+    if(fa !== fb) return fa - fb;
     var pa = /preview|exp/i.test(a) ? 1 : 0, pb = /preview|exp/i.test(b) ? 1 : 0;
     var la = /lite/i.test(a) ? 1 : 0, lb = /lite/i.test(b) ? 1 : 0;
     return (pa - pb) || (la - lb) || (versionModelo(b) - versionModelo(a));
