@@ -283,7 +283,7 @@
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
 import { generarFacturaPDF, generarSoporteDIAN, generarPedidoPDF, TITULO_DOC } from './factura-pdf.js';
-import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini } from './compras-parser.js';
+import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini, listarModelosGemini } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -1753,25 +1753,42 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       render();
     }catch(err){
       console.error(err);
-      if(err && err.code==='gemini'){ state.modal = {type:'pegar-compra', error:'La IA no pudo leer la factura: '+(err.status===429?'se acabó el cupo gratis por ahora, intenta más tarde.':(err.status===400||err.status===403?'revisa la clave de Gemini en Historial → Lectura con IA.':(err.message||'error desconocido')))}; render(); return; }
+      if(err && err.code==='gemini'){ state.modal = {type:'pegar-compra', error:'La IA no pudo leer la factura: '+(err.status===503||err.status===500||/high demand|overloaded/i.test(err.message||'')?'los servidores de Google están saturados en este momento. Intenta de nuevo en unos minutos.':err.status===429?'se acabó el cupo gratis por ahora, intenta más tarde.':(err.status===400||err.status===403?'revisa la clave de Gemini en Historial → Lectura con IA.':(err.message||'error desconocido')))}; render(); return; }
       state.modal = {type:'pegar-compra', error: err && err.code==='vacio' ? 'No llegó nada. Copia la factura y vuelve a intentar.' :
         'No pude leer ese archivo. Prueba copiando el texto de la factura y pegándolo aquí.'};
       render();
     }
   }
   // Lee una foto o PDF escaneado con Gemini; elige el modelo la primera vez y lo recuerda
+  // Lee con Gemini. Si el modelo está saturado (503/500) reintenta y luego prueba otros modelos Flash.
   async function leerConIA(bytes, mime){
     var ia = state.ia || {};
     var modelo = ia.modelo;
     if(!modelo){ modelo = await elegirModeloGemini(ia.clave); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:modelo }, {merge:true})); }
-    try{ return await leerFacturaConIA(bytes, mime, ia.clave, modelo); }
-    catch(e){
-      if(e && e.code==='gemini' && e.status===404){
-        modelo = await elegirModeloGemini(ia.clave); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:modelo }, {merge:true}));
-        return await leerFacturaConIA(bytes, mime, ia.clave, modelo);
+    var esperar = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
+    var saturado = function(e){ return e && e.code==='gemini' && (e.status===503 || e.status===500 || e.status===429 || /high demand|overloaded|unavailable/i.test(e.message||'')); };
+    var ultimoError = null;
+    for(var intento = 0; intento < 2; intento++){
+      try{ return await leerFacturaConIA(bytes, mime, ia.clave, modelo); }
+      catch(e){
+        ultimoError = e;
+        if(e && e.code==='gemini' && e.status===404) break;
+        if(!saturado(e)) throw e;
+        if(intento === 0){ if(state.modal) { state.modal.reintento = 'Google está ocupado, reintentando…'; render(); } await esperar(2500); }
       }
-      throw e;
     }
+    // Probar los otros modelos Flash de la lista
+    var otros = [];
+    try{ otros = (await listarModelosGemini(ia.clave)).filter(function(m){ return m !== modelo; }); }catch(eL){}
+    for(var i = 0; i < otros.length && i < 3; i++){
+      if(state.modal){ state.modal.reintento = 'Probando con otro modelo de Gemini ('+otros[i]+')…'; render(); }
+      try{
+        var res = await leerFacturaConIA(bytes, mime, ia.clave, otros[i]);
+        if(ultimoError && ultimoError.status===404) enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:otros[i] }, {merge:true}));
+        return res;
+      }catch(e2){ ultimoError = e2; if(!saturado(e2) && !(e2 && e2.status===404)) throw e2; }
+    }
+    throw ultimoError;
   }
   async function pegarDesdePortapapeles(){
     try{
@@ -3440,7 +3457,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     } else if(state.modal.type==='pegar-compra'){
       var pm = state.modal;
       html = '<h3>Agregar factura de compra</h3>'+
-        (pm.leyendo ? '<div class="empty" style="padding:26px 10px;">'+(pm.leyendoIA?'🤖 La IA está leyendo la factura… puede tardar unos segundos.':'Leyendo la factura…')+'</div>' :
+        (pm.leyendo ? '<div class="empty" style="padding:26px 10px;">'+(pm.leyendoIA?'🤖 La IA está leyendo la factura… puede tardar unos segundos.':'Leyendo la factura…')+(pm.reintento?'<div class="small" style="margin-top:8px;color:var(--amber);">'+esc(pm.reintento)+'</div>':'')+'</div>' :
         '<div class="small muted" style="margin-bottom:10px;">Copia la factura (el PDF o su texto) y pégala aquí. La app lee los productos, actualiza los costos y suma las cantidades al inventario. Antes de guardar puedes revisar todo.</div>'+
         '<div id="zona-pegar" class="zona-pegar" contenteditable="true" data-ph="Toca aquí y elige «Pegar»"></div>'+
         (pm.error ? '<div class="small" style="color:var(--red);margin-top:8px;">'+esc(pm.error)+'</div>' : '')+

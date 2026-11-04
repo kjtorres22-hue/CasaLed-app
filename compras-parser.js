@@ -318,7 +318,7 @@ async function pedirGemini(ruta, clave, opciones){
   var hdr = Object.assign({}, opciones.headers || {}, { 'x-goog-api-key': clave });
   var r = null;
   try{ r = await fetch(GEMINI + ruta, Object.assign({}, opciones, { headers: hdr })); }catch(e){ r = null; }
-  if(r && r.ok) return r;
+  if(r && (r.ok || [400, 401, 403].indexOf(r.status) === -1)) return r;
   var r2 = null;
   try{ r2 = await fetch(GEMINI + ruta + (ruta.indexOf('?') > -1 ? '&' : '?') + 'key=' + encodeURIComponent(clave), opciones); }catch(e){ r2 = null; }
   if(r2 && (r2.ok || !r)) return r2;
@@ -329,7 +329,9 @@ function versionModelo(nombre){
   var m = String(nombre).match(/(\d+(?:\.\d+)?)/); return m ? Number(m[1]) : 0;
 }
 // Busca el mejor modelo "flash" disponible para esta clave (los nombres cambian con el tiempo)
-export async function elegirModeloGemini(clave){
+export async function elegirModeloGemini(clave){ return (await listarModelosGemini(clave))[0]; }
+// Todos los modelos Flash útiles, del mejor al menos preferido
+export async function listarModelosGemini(clave){
   var r = await pedirGemini('models?pageSize=200', clave);
   var j = await r.json().catch(function(){ return {}; });
   if(!r.ok) throw { code:'gemini', status:r.status, message:(j.error && j.error.message) || ('Error ' + r.status) };
@@ -344,7 +346,7 @@ export async function elegirModeloGemini(clave){
     var la = /lite/i.test(a) ? 1 : 0, lb = /lite/i.test(b) ? 1 : 0;
     return (pa - pb) || (la - lb) || (versionModelo(b) - versionModelo(a));
   });
-  return modelos[0];
+  return modelos;
 }
 
 var PROMPT_FACTURA = 'Eres un asistente que lee facturas de compra colombianas (pesos colombianos). ' +
