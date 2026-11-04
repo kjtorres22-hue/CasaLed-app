@@ -283,7 +283,7 @@
 <script type="module">
 import { firebaseConfig, OWNER_EMAIL, USE_EMULATORS } from './firebase-config.js';
 import { generarFacturaPDF, generarSoporteDIAN, generarPedidoPDF, TITULO_DOC } from './factura-pdf.js';
-import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini, listarModelosGemini } from './compras-parser.js';
+import { leerPDF, textoAPaginas, parsearFactura, leerRUT, pdfAImagenes, leerFacturaConIA, elegirModeloGemini, listarModelosGemini, familiaModelo } from './compras-parser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
@@ -1760,35 +1760,23 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     }
   }
   // Lee una foto o PDF escaneado con Gemini; elige el modelo la primera vez y lo recuerda
-  // Lee con Gemini. Si el modelo está saturado (503/500) reintenta y luego prueba otros modelos Flash.
+  // Lee con Gemini. Si el modelo guardado está saturado o ya no existe, busca otro que sí responda,
+  // lo deja guardado para las próximas facturas y reintenta.
   async function leerConIA(bytes, mime){
     var ia = state.ia || {};
     var modelo = ia.modelo;
-    if(!modelo){ modelo = await elegirModeloGemini(ia.clave); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:modelo }, {merge:true})); }
-    var esperar = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
-    var saturado = function(e){ return e && e.code==='gemini' && (e.status===503 || e.status===500 || e.status===429 || /high demand|overloaded|unavailable/i.test(e.message||'')); };
-    var ultimoError = null;
-    for(var intento = 0; intento < 2; intento++){
+    var falla = function(e){ return e && e.code==='gemini' && (e.status===503 || e.status===500 || e.status===429 || e.status===404 || /high demand|overloaded|unavailable/i.test(e.message||'')); };
+    var guardar = function(m){ state.ia = Object.assign({}, state.ia, { modelo:m }); enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:m }, {merge:true})); };
+    var evitar = [];
+    if(modelo){
       try{ return await leerFacturaConIA(bytes, mime, ia.clave, modelo); }
-      catch(e){
-        ultimoError = e;
-        if(e && e.code==='gemini' && e.status===404) break;
-        if(!saturado(e)) throw e;
-        if(intento === 0){ if(state.modal) { state.modal.reintento = 'Google está ocupado, reintentando…'; render(); } await esperar(2500); }
-      }
+      catch(e){ if(!falla(e)) throw e; evitar.push(familiaModelo(modelo)); }
     }
-    // Probar los otros modelos Flash de la lista
-    var otros = [];
-    try{ otros = (await listarModelosGemini(ia.clave)).filter(function(m){ return m !== modelo; }); }catch(eL){}
-    for(var i = 0; i < otros.length && i < 3; i++){
-      if(state.modal){ state.modal.reintento = 'Probando con otro modelo de Gemini ('+otros[i]+')…'; render(); }
-      try{
-        var res = await leerFacturaConIA(bytes, mime, ia.clave, otros[i]);
-        if(ultimoError && ultimoError.status===404) enSegundoPlano(setDoc(doc(fs, 'privado/ia'), { modelo:otros[i] }, {merge:true}));
-        return res;
-      }catch(e2){ ultimoError = e2; if(!saturado(e2) && !(e2 && e2.status===404)) throw e2; }
-    }
-    throw ultimoError;
+    if(state.modal){ state.modal.reintento = modelo ? ('El modelo '+modelo+' no responde; buscando otro modelo de Gemini…') : 'Buscando un modelo de Gemini disponible…'; render(); }
+    var nuevo = await elegirModeloGemini(ia.clave, evitar);
+    guardar(nuevo);
+    if(state.modal){ state.modal.reintento = 'Leyendo con '+nuevo+'…'; render(); }
+    return await leerFacturaConIA(bytes, mime, ia.clave, nuevo);
   }
   async function pegarDesdePortapapeles(){
     try{
@@ -3881,7 +3869,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         var modeloN = await elegirModeloGemini(claveN);
         await setDoc(doc(fs, 'privado/ia'), { clave:claveN, modelo:modeloN, guardadaEn:todayISO() });
         toast('Listo ✓ La IA (' + modeloN + ') ya lee fotos de facturas');
-      }catch(eK){ console.error(eK); toast('La clave no funcionó: '+((eK && eK.message) || 'revísala')); }
+      }catch(eK){
+        console.error(eK);
+        if(eK && [500, 503, 429].indexOf(eK.status) > -1){
+          // la clave sí es válida; solo están ocupados los modelos ahora mismo
+          await setDoc(doc(fs, 'privado/ia'), { clave:claveN, modelo:null, guardadaEn:todayISO() });
+          toast('Clave guardada ✓ Google está ocupado ahora; el modelo se elige al leer la primera factura');
+        } else toast('La clave no funcionó: '+((eK && eK.message) || 'revísala'));
+      }
     }
     else if(action==='quitar-clave-ia'){
       if(!confirm('¿Quitar la clave de Gemini? Las fotos de facturas ya no se leerán.')) return;

@@ -328,9 +328,10 @@ async function pedirGemini(ruta, clave, opciones){
 function versionModelo(nombre){
   var m = String(nombre).match(/(\d+(?:\.\d+)?)/); return m ? Number(m[1]) : 0;
 }
-// Busca el mejor modelo "flash" disponible para esta clave (los nombres cambian con el tiempo)
-export async function elegirModeloGemini(clave){ return (await listarModelosGemini(clave))[0]; }
-// Todos los modelos Flash útiles, del mejor al menos preferido
+// Familia de un modelo: versión + si es lite (gemini-3.8-flash y gemini-3.8-flash-001 son la misma)
+export function familiaModelo(m){ return versionModelo(m) + (/lite/i.test(m) ? '-lite' : ''); }
+// Todos los modelos Flash útiles, del mejor al menos preferido.
+// Se excluyen los alias «latest»: apuntan al modelo más nuevo, que suele ser el más saturado.
 export async function listarModelosGemini(clave){
   var r = await pedirGemini('models?pageSize=200', clave);
   var j = await r.json().catch(function(){ return {}; });
@@ -338,7 +339,7 @@ export async function listarModelosGemini(clave){
   var modelos = (j.models || []).filter(function(m){
     var n = String(m.name || '');
     return (m.supportedGenerationMethods || []).indexOf('generateContent') !== -1 && /flash/i.test(n)
-      && !/(image|tts|audio|live|embedding|thinking-exp|native)/i.test(n);
+      && !/(image|tts|audio|live|embedding|thinking-exp|native|latest)/i.test(n);
   }).map(function(m){ return String(m.name).replace(/^models\//, ''); });
   if(!modelos.length) throw { code:'gemini', message:'Tu clave no tiene modelos Gemini Flash disponibles.' };
   modelos.sort(function(a, b){
@@ -347,6 +348,34 @@ export async function listarModelosGemini(clave){
     return (pa - pb) || (la - lb) || (versionModelo(b) - versionModelo(a));
   });
   return modelos;
+}
+// Prueba real: le pide al modelo una respuesta mínima. Devuelve null si responde, o el error.
+export async function probarModeloGemini(clave, modelo){
+  var r = await pedirGemini('models/' + encodeURIComponent(modelo) + ':generateContent', clave, {
+    method:'POST', headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({ contents:[{ role:'user', parts:[{ text:'Responde solo: OK' }] }], generationConfig:{ maxOutputTokens: 5, temperature: 0 } })
+  });
+  if(r.ok) return null;
+  var j = await r.json().catch(function(){ return {}; });
+  return { code:'gemini', status:r.status, message:(j.error && j.error.message) || ('Error ' + r.status), modelo:modelo };
+}
+// Elige el primer modelo Flash que de verdad responde (no solo el que aparece en la lista).
+// evitar: familias de modelos que ya fallaron.
+export async function elegirModeloGemini(clave, evitar){
+  evitar = evitar || [];
+  var lista = (await listarModelosGemini(clave)).filter(function(m){ return evitar.indexOf(familiaModelo(m)) === -1; });
+  var probadas = {}, ultimo = null;
+  for(var i = 0; i < lista.length; i++){
+    var fam = familiaModelo(lista[i]);
+    if(probadas[fam]) continue;
+    probadas[fam] = 1;
+    var e = await probarModeloGemini(clave, lista[i]);
+    if(!e) return lista[i];
+    ultimo = e;
+    if([400, 401, 403].indexOf(e.status) > -1) throw e;   // clave mala: no tiene sentido seguir probando
+    if(Object.keys(probadas).length >= 6) break;
+  }
+  throw ultimo || { code:'gemini', message:'Ningún modelo de Gemini respondió.' };
 }
 
 var PROMPT_FACTURA = 'Eres un asistente que lee facturas de compra colombianas (pesos colombianos). ' +
