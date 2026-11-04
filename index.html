@@ -342,7 +342,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia','pd-ruta','pd-sugerir','ver-proveedor','editar-proveedor','guardar-proveedor','pedido-proveedor'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia','pd-ruta','pd-sugerir','ver-proveedor','editar-proveedor','guardar-proveedor','pedido-proveedor','leer-compra-ia'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -1710,6 +1710,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       return !pv || !cp || cp.indexOf(pv)>-1 || pv.indexOf(cp)>-1 || cp.split(' ')[0]===pv.split(' ')[0];
     }) || null;
   }
+  // Factura que pasó por «Agregar factura» pero se guardó solo en la carpeta (sin productos ni inventario)
+  function sinSumar(c){ return !!(c && c.aplicada && !c.aplicada.inventario && !(c.items && c.items.length)); }
   async function procesarEntradaCompra(entrada){
     if(!state.modal || state.modal.type!=='pegar-compra') state.modal = {type:'pegar-compra'};
     state.modal.leyendo = true; state.modal.error = ''; render();
@@ -1740,13 +1742,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         prepararLineaCompra(nl);
         return nl;
       });
-      var dup = buscarCompraDuplicada(res.proveedor, res.numero);
+      var dup = entrada.compra || buscarCompraDuplicada(res.proveedor, res.numero);
       state.modal = {
-        type:'revisar-compra', archivo:archivo, esFoto:esFoto, duplicada:dup,
-        cab:{ proveedor:res.proveedor || (dup&&dup.proveedor) || '', numero:res.numero||'', fecha:res.fecha||fechaLocalISO(todayISO()), total:res.total||res.suma||0,
+        type:'revisar-compra', archivo: entrada.compra ? null : archivo, esFoto:esFoto, duplicada:dup, fija: !!entrada.compra,
+        cab:{ proveedor:res.proveedor || (dup&&dup.proveedor) || '', numero:res.numero || (entrada.compra && entrada.compra.numero) || '', fecha:res.fecha||fechaLocalISO(todayISO()), total:res.total||res.suma||0,
           datos: Object.assign({ nit:'', telefono:'', direccion:'', ciudad:'', correo:'' }, (dup && dup.proveedorDatos) || {}, res.proveedorDatos || {}) },
         porIA: !!res.porIA,
-        suma:res.suma, lineas:lineas, actualizarCostos: lineas.length>0, sumarStock: lineas.length>0 && !dup
+        suma:res.suma, lineas:lineas, actualizarCostos: lineas.length>0, sumarStock: lineas.length>0 && (!dup || sinSumar(dup))
       };
       render();
     }catch(err){
@@ -1803,7 +1805,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var faltaColor = activas.filter(function(l){ var p = productoById(l.productoId); return p && p.colores && p.colores.length && !l.color && m.sumarStock; });
     if(faltaColor.length){ toast('Elige el color de: '+faltaColor.map(function(l){ return l.codigo||l.descripcion; }).join(', ')); return; }
     if(sinAsignar.length && !confirm(sinAsignar.length+' producto(s) sin asignar no se tendrán en cuenta. ¿Seguir?')) return;
-    if(m.duplicada && m.sumarStock && !confirm('Esta factura ya estaba registrada. Si su mercancía ya está en el inventario, se sumaría dos veces. ¿Sumar de todas formas?')) return;
+    if(m.duplicada && !sinSumar(m.duplicada) && m.sumarStock && !confirm('Esta factura ya estaba registrada. Si su mercancía ya está en el inventario, se sumaría dos veces. ¿Sumar de todas formas?')) return;
     if(!m.sumarStock && !m.actualizarCostos && activas.length && !confirm('No se van a actualizar costos ni sumar inventario; solo se guarda la factura en la carpeta. ¿Seguir?')) return;
 
     var cid = m.duplicada ? m.duplicada.id : nuevoId('compras');
@@ -2769,6 +2771,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           ((c.proveedorDatos && (c.proveedorDatos.nit || c.proveedorDatos.telefono)) ? '<div class="small muted">'+[c.proveedorDatos.nit?('NIT '+esc(c.proveedorDatos.nit)):'', c.proveedorDatos.telefono?('<a href="tel:'+esc(c.proveedorDatos.telefono)+'">📞 '+esc(c.proveedorDatos.telefono)+'</a>'):''].filter(Boolean).join(' · ')+'</div>' : '')+
         '</div>'+
         '<div class="row">'+
+          (c.partes && sinSumar(c) ? '<button class="btn btn-sm btn-primary" data-action="leer-compra-ia" data-id="'+c.id+'">🤖 Leer</button>' : '')+
           (c.partes ? '<button class="btn btn-sm btn-ghost" data-action="ver-compra" data-id="'+c.id+'">Ver</button>' :
             '<button class="btn btn-sm btn-primary" data-action="adjuntar-compra" data-id="'+c.id+'">Adjuntar</button>')+
           '<button class="btn btn-sm btn-ghost" data-action="editar-compra" data-id="'+c.id+'">✎</button>'+
@@ -3531,7 +3534,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '</div>';
       }).join('');
       html = '<h3>Revisar factura de compra</h3>'+
-        (rm2.duplicada ? '<div class="small" style="background:rgba(245,158,11,.12);border:1px solid var(--amber);border-radius:10px;padding:10px;margin-bottom:12px;">Esta factura ya estaba registrada'+
+        (sinSumar(rm2.duplicada) ? '<div class="small" style="background:rgba(43,140,255,.10);border:1px solid var(--blue);border-radius:10px;padding:10px;margin-bottom:12px;">Esta factura ya estaba guardada en la carpeta, pero sin sus productos. Al guardar se completa esa misma factura (no se crea otra).</div>' : '')+
+        (rm2.duplicada && !sinSumar(rm2.duplicada) ? '<div class="small" style="background:rgba(245,158,11,.12);border:1px solid var(--amber);border-radius:10px;padding:10px;margin-bottom:12px;">Esta factura ya estaba registrada'+
           (rm2.duplicada.aplicada && rm2.duplicada.aplicada.inventario ? ' <strong>y su mercancía ya se sumó al inventario</strong>' : '')+
           '. «Sumar al inventario» quedó apagado para no contar dos veces; los costos sí se pueden actualizar.</div>' : '')+
         (rm2.porIA ? '<div class="small" style="background:rgba(43,140,255,.10);border:1px solid var(--blue);border-radius:10px;padding:10px;margin-bottom:12px;">🤖 Leída con IA. Revisa cantidades y precios antes de guardar: la IA se puede equivocar.</div>' : '')+
@@ -4013,6 +4017,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.adjuntarCompraId = id;
       var inpC = document.getElementById('compra-archivo-input'); if(inpC) inpC.click();
     }
+    else if(action==='leer-compra-ia'){
+      var cL = state.compras.find(function(c){ return c.id===id; }); if(!cL) return;
+      var esImgL = /^image\//.test(cL.tipoArchivo||'');
+      if(esImgL && !(state.ia && state.ia.clave)){ toast('Primero pon la clave de Gemini en Historial → Lectura de facturas con IA'); return; }
+      state.modal = { type:'pegar-compra', leyendo:true }; render();
+      try{ var fL = await leerArchivoCompra(cL); await procesarEntradaCompra({ file:fL, compra:cL }); }
+      catch(eL){ state.modal = null; render(); toast(eL && eL.code==='archivo-incompleto' ? 'No pude abrir el archivo de esa factura' : mensajeError(eL)); }
+    }
     else if(action==='ver-compra'){
       var cv = state.compras.find(function(c){ return c.id===id; });
       if(cv) prepararArchivo((cv.proveedor||'Factura')+(cv.numero?(' N.° '+cv.numero):''), leerArchivoCompra(cv).then(function(f){ return {file:f}; }));
@@ -4490,7 +4502,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         state.modal.cab.proveedor = document.getElementById('rc-proveedor').value;
         state.modal.cab.numero = document.getElementById('rc-numero').value;
         var dupN = buscarCompraDuplicada(state.modal.cab.proveedor, state.modal.cab.numero);
-        if(!!dupN !== !!state.modal.duplicada){ state.modal.duplicada = dupN; if(dupN) state.modal.sumarStock = false; render({preservar:true}); }
+        if(!state.modal.fija && !!dupN !== !!state.modal.duplicada){ state.modal.duplicada = dupN; if(dupN && !sinSumar(dupN)) state.modal.sumarStock = false; render({preservar:true}); }
         return;
       }
     }
