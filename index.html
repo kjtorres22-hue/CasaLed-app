@@ -311,7 +311,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   "use strict";
 
   var state = {
-    ready:false, dbOk:null,
+    ready:false, dbOk:null, servidor:{}, enDespachos:false, jornadaSelId:null,
     productos:[], clientes:[], rutas:[], movimientos:[], ventas:[], gastos:[], config:null,
     activeTab:'vender',
     cart:{}, // productoId -> cantidad
@@ -342,7 +342,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','cerrar-ruta-de','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia','pd-ruta','pd-sugerir','ver-proveedor','editar-proveedor','guardar-proveedor','pedido-proveedor','leer-compra-ia'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia','pd-ruta','pd-sugerir','ver-proveedor','editar-proveedor','guardar-proveedor','pedido-proveedor','leer-compra-ia'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -373,7 +373,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   // Mantiene la misma forma de llamadas que usaba la app (db.collection(...).add, db.doc(...).update, onSnapshot...).
   // Las escrituras NO esperan al servidor: quedan en el teléfono y se suben solas cuando hay señal.
   function wrapQuerySnap(qs){
-    return { empty: qs.empty, docs: qs.docs.map(function(d){ return { id:d.id, data:function(){ return d.data(); } }; }) };
+    return { empty: qs.empty, fromCache: !!(qs.metadata && qs.metadata.fromCache), docs: qs.docs.map(function(d){ return { id:d.id, data:function(){ return d.data(); } }; }) };
   }
   function wrapDocSnap(ds){
     return { id: ds.id, exists: ds.exists(), data: function(){ return ds.data(); } };
@@ -570,13 +570,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     });
     db.collection('ventas').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.ventas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render({preservar:true});
+      if(!snap.fromCache) state.servidor.ventas = true;
+      render({preservar:true}); revisarJornadas();
       if(!state.cobrosRevisados){ state.cobrosRevisados = true; setTimeout(function(){ avisarCobros(false); }, 900); }
       actualizarInsignia();
     });
     db.collection('gastos').orderBy('fecha','desc').limit(300).onSnapshot(function(snap){
       state.gastos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render({preservar:true});
+      if(!snap.fromCache) state.servidor.gastos = true;
+      render({preservar:true}); revisarJornadas();
     });
     db.doc('config/general').onSnapshot(function(snap){
       state.config = snap.exists ? snap.data() : null;
@@ -588,8 +590,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       render({preservar:true});
     }, function(){ state.encargos = []; });
     db.collection('jornadas').orderBy('iniciadaEn','desc').limit(60).onSnapshot(function(snap){
+      var antes = state.enDespachos ? null : miJornada();
       state.jornadas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render({preservar:true});
+      if(!snap.fromCache) state.servidor.jornadas = true;
+      // si la otra persona cerró la ruta en la que estoy, avisar
+      if(antes && !antes.virtual){
+        var ahora = state.jornadas.find(function(j){ return j.id===antes.id; });
+        if(ahora && ahora.estado==='cerrada' && ahora.cerradaPor && ahora.cerradaPor!==nombreUsuario()) toast(ahora.rutaNombre+' fue cerrada por '+ahora.cerradaPor);
+      }
+      render({preservar:true}); revisarJornadas();
     });
     if(state.isAdmin){
       unsub.push(onSnapshot(doc(fs, 'privado/ia'), function(ds){ state.ia = ds.exists() ? ds.data() : null; render({preservar:true}); }, function(){ state.ia = null; }));
@@ -649,9 +658,45 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       }).join('')+'</optgroup>';
     }).join('');
   }
+  // La ruta abierta es UNA sola y compartida: si el vendedor la abre, el administrador la ve abierta
+  // (y al revés). Despachos no se inicia ni se cierra: hay una «salida» por mes, siempre abierta.
+  function esJornadaDespachos(j){ return !!(j && (j.despachos || esRutaDespachos(j.rutaId))); }
+  function rutaDespachos(){ return state.rutas.find(function(r){ return esRutaDespachos(r.id); }) || null; }
+  function mesDe(fecha){ var d = new Date(fecha); return isNaN(d) ? mesActual() : d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+  function idDespachosMes(ym){ return 'despachos-'+ym; }
+  function jornadaDespachosMes(ym){
+    var r = rutaDespachos(); if(!r) return null;
+    ym = ym || mesActual();
+    var id = idDespachosMes(ym);
+    var j = state.jornadas.find(function(x){ return x.id===id; });
+    if(j) return j;
+    var p = ym.split('-');
+    return { id:id, rutaId:r.id, rutaNombre:r.nombre, estado:'abierta', despachos:true, mes:ym,
+      iniciadaEn:new Date(Number(p[0]), Number(p[1])-1, 1, 0, 0, 0).toISOString(), virtual:true };
+  }
+  // Crea en Firestore la salida de Despachos del mes la primera vez que se usa
+  function asegurarJornada(j){
+    if(!j || !j.virtual) return j;
+    var datos = { rutaId:j.rutaId, rutaNombre:j.rutaNombre, estado:'abierta', despachos:true, mes:j.mes, iniciadaEn:j.iniciadaEn,
+      iniciadaPor:state.auth.user.uid, iniciadaPorNombre:'Despachos' };
+    enSegundoPlano(setDoc(doc(fs, 'jornadas/'+j.id), datos, { merge:true }));
+    var real = Object.assign({ id:j.id }, datos);
+    state.jornadas = [real].concat(state.jornadas.filter(function(x){ return x.id!==j.id; }));
+    return real;
+  }
+  // Rutas normales abiertas (una por ruta: si por error se abrió dos veces, cuenta la primera)
+  function rutasAbiertas(){
+    var porRuta = {};
+    state.jornadas.filter(function(j){ return j.estado==='abierta' && !esJornadaDespachos(j); })
+      .sort(function(a,b){ return String(a.iniciadaEn).localeCompare(String(b.iniciadaEn)); })
+      .forEach(function(j){ if(!porRuta[j.rutaId]) porRuta[j.rutaId] = j; });
+    return Object.keys(porRuta).map(function(k){ return porRuta[k]; });
+  }
+  // La salida en la que se está trabajando en este celular: la ruta abierta (compartida) o Despachos del mes
   function miJornada(){
-    var uid = state.auth.user && state.auth.user.uid;
-    return state.jornadas.find(function(j){ return j.estado==='abierta' && j.iniciadaPor===uid; }) || null;
+    if(state.enDespachos) return jornadaDespachosMes();
+    var ab = rutasAbiertas();
+    return ab.find(function(j){ return j.id===state.jornadaSelId; }) || ab[0] || null;
   }
   function horaCorta(iso){ try{ return new Date(iso).toLocaleTimeString('es-CO',{hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } }
   function iniciarRuta(rutaId){
@@ -661,7 +706,47 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       iniciadaPor:state.auth.user.uid, iniciadaPorNombre:nombreUsuario() };
     enSegundoPlano(setDoc(ref, j));
     state.jornadas = [Object.assign({id:ref.id}, j)].concat(state.jornadas);
+    state.enDespachos = false; state.jornadaSelId = ref.id;
     state.selectedRutaId = r.id; state.selectedClienteId = null; state.cart = {};
+  }
+  // Solo el administrador: junta las salidas repetidas de una misma ruta en la primera,
+  // pasa las salidas viejas de Despachos a la salida de su mes y cierra los meses ya terminados.
+  var ordenandoJornadas = false, temporizadorJornadas = null;
+  function revisarJornadas(){
+    if(!state.isAdmin) return;
+    clearTimeout(temporizadorJornadas);
+    temporizadorJornadas = setTimeout(function(){
+      if(state.servidor.ventas && state.servidor.gastos && state.servidor.jornadas) ordenarJornadas();
+    }, 1500);
+  }
+  function ordenarJornadas(){
+    if(!state.isAdmin || ordenandoJornadas || !state.rutas.length) return;
+    var b = writeBatch(fs), cambios = 0;
+    var mover = function(desde, hacia){
+      state.ventas.forEach(function(v){ if(v.jornadaId===desde.id){ b.update(doc(fs, 'ventas/'+v.id), { jornadaId:hacia.id, rutaId:hacia.rutaId, rutaNombre:hacia.rutaNombre }); v.jornadaId = hacia.id; cambios++; } });
+      state.gastos.forEach(function(g){ if(g.jornadaId===desde.id){ b.update(doc(fs, 'gastos/'+g.id), { jornadaId:hacia.id, rutaId:hacia.rutaId, rutaNombre:hacia.rutaNombre }); g.jornadaId = hacia.id; cambios++; } });
+    };
+    // 1) rutas normales abiertas dos veces
+    var principales = {};
+    rutasAbiertas().forEach(function(j){ principales[j.rutaId] = j; });
+    state.jornadas.filter(function(j){ return j.estado==='abierta' && !esJornadaDespachos(j) && principales[j.rutaId] && principales[j.rutaId].id!==j.id; }).forEach(function(j){
+      mover(j, principales[j.rutaId]);
+      b.update(doc(fs, 'jornadas/'+j.id), { estado:'fusionada', fusionadaEn:principales[j.rutaId].id }); j.estado = 'fusionada'; cambios++;
+    });
+    // 2) Despachos abiertos al estilo viejo (iniciados a mano) → salida del mes de cada factura
+    state.jornadas.filter(function(j){ return j.estado==='abierta' && esRutaDespachos(j.rutaId) && !j.despachos; }).forEach(function(j){
+      state.ventas.concat(state.gastos).forEach(function(x){
+        if(x.jornadaId!==j.id) return;
+        var dest = asegurarJornada(jornadaDespachosMes(mesDe(x.fecha)));
+        b.update(doc(fs, (x.items ? 'ventas/' : 'gastos/')+x.id), { jornadaId:dest.id, rutaId:dest.rutaId, rutaNombre:dest.rutaNombre });
+        x.jornadaId = dest.id; cambios++;
+      });
+      b.update(doc(fs, 'jornadas/'+j.id), { estado:'fusionada', fusionadaEn:'despachos-por-mes' }); j.estado = 'fusionada'; cambios++;
+    });
+    if(cambios){ ordenandoJornadas = true; b.commit().catch(reportarError).then(function(){ ordenandoJornadas = false; }); }
+    // 3) meses de Despachos ya terminados → se cierran con su balance
+    var ymHoy = mesActual();
+    state.jornadas.filter(function(j){ return j.despachos && j.estado==='abierta' && j.mes && j.mes < ymHoy; }).forEach(function(j){ cerrarJornada(j, true); });
   }
   // Balance de una jornada: se calcula con las ventas y gastos actuales (incluye ediciones y facturas eliminadas).
   function resumenJornada(j){
@@ -710,19 +795,23 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     });
     enSegundoPlano(b.commit());
   }
-  function cerrarJornada(j){
+  function cerrarJornada(j, automatico){
     var resumen = resumenJornada(j);
-    var cambios = { estado:'cerrada', cerradaEn:todayISO(), cerradaPor:nombreUsuario(), resumen:resumen };
+    var cambios = { estado:'cerrada', cerradaEn:todayISO(), cerradaPor: automatico ? 'Cierre del mes' : nombreUsuario(), resumen:resumen };
     enSegundoPlano(updateDoc(doc(fs, 'jornadas/'+j.id), cambios));
     var cerrada = Object.assign({}, j, cambios);
     state.jornadas = state.jornadas.map(function(x){ return x.id===j.id ? cerrada : x; });
-    state.cart = {}; state.selectedClienteId = null;
+    if(!automatico){ state.cart = {}; state.selectedClienteId = null; }
     return cerrada;
   }
   function textoBalance(j, r){
     var L = [];
-    L.push('*Balance '+j.rutaNombre+'* · '+(j.iniciadaPorNombre||''));
-    L.push(fmtFecha(j.iniciadaEn)+(j.cerradaEn?(' → '+horaCorta(j.cerradaEn)):' (en curso)'));
+    if(esJornadaDespachos(j) && j.mes){
+      L.push('*Balance '+j.rutaNombre+'* · '+nombreMes(j.mes)+(j.estado==='abierta'?' (mes en curso)':''));
+    } else {
+      L.push('*Balance '+j.rutaNombre+'* · '+(j.iniciadaPorNombre||''));
+      L.push(fmtFecha(j.iniciadaEn)+(j.cerradaEn?(' → '+horaCorta(j.cerradaEn)):' (en curso)'));
+    }
     L.push('');
     L.push('Facturas: '+r.facturas+(r.numeros.length?(' (N.° '+r.numeros.join(', ')+')'):''));
     L.push('*Total vendido: '+fmtCOP(r.totalVendido)+'*');
@@ -1064,7 +1153,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     await db.doc('config/general').set(data, {merge:true});
   }
   async function registrarGasto(data){
-    var jg = miJornada();
+    var jg = asegurarJornada(miJornada());
     var ruta = jg ? rutaById(jg.rutaId) : (data.rutaId ? rutaById(data.rutaId) : null);
     await db.collection('gastos').add({
       concepto:data.concepto, monto:Number(data.monto)||0, jornadaId: jg ? jg.id : null,
@@ -1109,7 +1198,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var total = items.reduce(function(s,it){return s+it.subtotal;},0);
     var cfg = cfgEmpresa();
     var ruta = rutaById(cliente.rutaId);
-    var jornadaVenta = miJornada();
+    var jornadaVenta = asegurarJornada(miJornada());
     if(!jornadaVenta){ state.ventaEnCurso = false; toast('Primero inicia la ruta'); return; }
     var tipoPago = state.checkoutPago || 'contado';
     var abono = tipoPago==='credito' ? Math.max(0, Math.min(total, Number(state.checkoutAbono)||0)) : total;
@@ -2232,16 +2321,23 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     var jornada = state.editandoVenta ? null : miJornada();
     if(!state.editandoVenta && !jornada){
       // Sin ruta iniciada no se puede vender
-      var abiertasOtros = state.jornadas.filter(function(j){ return j.estado==='abierta'; });
+      var rDesp = rutaDespachos();
+      var jdHoy = rDesp ? jornadaDespachosMes() : null;
+      var rjd = jdHoy ? resumenJornada(jdHoy) : null;
+      var rutasNormales = state.rutas.filter(function(r){ return !esRutaDespachos(r.id); });
       return botonEncargos()+
+        (rDesp ? '<div class="card row between" style="border-color:var(--blue);">'+
+          '<div><div class="product-name">📦 '+esc(rDesp.nombre)+'</div>'+
+            '<div class="small muted">Siempre abierta · '+esc(nombreMes(mesActual()))+' · '+rjd.facturas+' factura(s) · <span class="mono">'+fmtCOP(rjd.totalVendido)+'</span></div></div>'+
+          '<button class="btn btn-primary" data-action="entrar-despachos">Entrar</button>'+
+        '</div>' : '')+
         '<h2 class="section-title">Elige la ruta para empezar</h2>'+
-        '<div class="small muted" style="margin-bottom:12px;">Para vender y anotar gastos primero inicia la ruta. Al terminar la cierras y te muestra el balance.</div>'+
-        (state.rutas.length ? state.rutas.map(function(r){
-          var otros = abiertasOtros.filter(function(j){ return j.rutaId===r.id; });
+        '<div class="small muted" style="margin-bottom:12px;">Cuando alguien inicia una ruta, queda abierta para todos: el vendedor y el administrador ven y facturan en la misma ruta.</div>'+
+        (rutasNormales.length ? rutasNormales.map(function(r){
           var nCli = state.clientes.filter(function(c){ return c.rutaId===r.id; }).length;
           return '<div class="card row between">'+
             '<div><div class="product-name">'+esc(r.nombre)+'</div>'+
-              '<div class="small muted">'+nCli+' cliente(s)'+(otros.length?(' · En ruta: '+otros.map(function(j){ return esc(j.iniciadaPorNombre||''); }).join(', ')):'')+'</div>'+
+              '<div class="small muted">'+nCli+' cliente(s)</div>'+
               avisoEncargosRuta(r.id)+'</div>'+
             '<button class="btn btn-primary" data-action="iniciar-ruta" data-id="'+r.id+'">Iniciar ruta</button>'+
           '</div>';
@@ -2327,14 +2423,28 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '</div>'+
       '</div>' : '';
     var bannerJornada = '';
-    if(jornada){
+    if(jornada && esJornadaDespachos(jornada)){
+      var rjD = resumenJornada(jornada);
+      var abiertaN = rutasAbiertas()[0];
+      bannerJornada = '<div class="card" style="border-color:var(--blue);">'+
+        '<div class="row between">'+
+          '<div><div class="product-name">📦 '+esc(jornada.rutaNombre)+'</div>'+
+          '<div class="small muted">Siempre abierta · '+esc(nombreMes(jornada.mes||mesActual()))+' · '+rjD.facturas+' factura(s) · <span class="mono">'+fmtCOP(rjD.totalVendido)+'</span></div></div>'+
+          '<button class="btn btn-sm btn-ghost" data-action="balance-despachos">Balance del mes</button>'+
+        '</div>'+
+        '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="salir-despachos">'+(abiertaN ? '← Volver a la ruta '+esc(abiertaN.rutaNombre) : '← Elegir otra ruta')+'</button>'+
+      '</div>';
+    } else if(jornada){
       var rj = resumenJornada(jornada);
+      var otrasAb = rutasAbiertas().filter(function(j){ return j.id!==jornada.id; });
       bannerJornada = '<div class="card" style="border-color:var(--green);">'+
         '<div class="row between">'+
           '<div><div class="product-name">🟢 '+esc(jornada.rutaNombre)+'</div>'+
-          '<div class="small muted">Iniciada '+horaCorta(jornada.iniciadaEn)+' · '+rj.facturas+' factura(s) · <span class="mono">'+fmtCOP(rj.totalVendido)+'</span></div></div>'+
+          '<div class="small muted">Iniciada '+horaCorta(jornada.iniciadaEn)+(jornada.iniciadaPorNombre?' por '+esc(jornada.iniciadaPorNombre):'')+' · '+rj.facturas+' factura(s) · <span class="mono">'+fmtCOP(rj.totalVendido)+'</span></div></div>'+
           '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta">Cerrar ruta</button>'+
         '</div>'+
+        (otrasAb.length ? '<div class="small" style="margin-top:8px;">También abierta: '+otrasAb.map(function(j){ return '<button class="link-btn" style="padding:0;" data-action="sel-jornada" data-id="'+j.id+'">'+esc(j.rutaNombre)+'</button>'; }).join(' · ')+'</div>' : '')+
+        (rutaDespachos() ? '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="entrar-despachos">📦 Ir a '+esc(rutaDespachos().nombre)+'</button>' : '')+
         avisoEncargosRuta(jornada.rutaId)+
         ((state.isAdmin && ventasSinSalida().length) ?
           '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="abrir-incluir-facturas">+ Incluir facturas hechas antes ('+ventasSinSalida().length+')</button>' : '')+
@@ -2981,7 +3091,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var ventasRuta = state.ventas.filter(function(v){ return enRuta(v.rutaId); });
     var gastosRuta = state.gastos.filter(function(g){ return enRuta(g.rutaId); });
-    var jornadasRuta = state.jornadas.filter(function(j){ return enRuta(j.rutaId); });
+    var jornadasRuta = state.jornadas.filter(function(j){ return enRuta(j.rutaId) && j.estado!=='fusionada'; });
 
     var deudores = ventasRuta.filter(function(v){ return v.tipoPago==='credito' && (Number(v.saldo)||0) > 0; });
     var totalDeuda = deudores.reduce(function(s,v){return s+(Number(v.saldo)||0);},0);
@@ -3026,13 +3136,14 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
     var jornadasHtml = jornadasRuta.length ? jornadasRuta.slice(0, 15).map(function(j){
       var tot = j.estado==='cerrada' && j.resumen ? j.resumen.totalVendido : resumenJornada(j).totalVendido;
+      var esD = esJornadaDespachos(j) && j.mes;
       return '<div class="list-item"><div class="row between">'+
-        '<div>'+(j.estado==='abierta' ? '<span class="badge badge-entrada">En curso</span>' : '<span class="badge" style="background:var(--panel-2);color:var(--muted);">Cerrada</span>')+
-          ' <span class="small">'+esc(j.iniciadaPorNombre||'')+'</span>'+
-          '<div class="small muted">'+fmtFecha(j.iniciadaEn)+' · '+fmtCOP(tot)+'</div></div>'+
+        '<div>'+(j.estado==='abierta' ? '<span class="badge badge-entrada">'+(esD?'Mes en curso':'En curso')+'</span>' : '<span class="badge" style="background:var(--panel-2);color:var(--muted);">Cerrada</span>')+
+          ' <span class="small">'+(esD ? esc(nombreMes(j.mes)) : esc(j.iniciadaPorNombre||''))+'</span>'+
+          '<div class="small muted">'+(esD ? '' : fmtFecha(j.iniciadaEn)+' · ')+fmtCOP(tot)+'</div></div>'+
         '<div class="row">'+
           '<button class="btn btn-sm btn-ghost" data-action="ver-balance" data-id="'+j.id+'">Balance</button>'+
-          (state.isAdmin && j.estado==='abierta' && !(state.auth.user && j.iniciadaPor===state.auth.user.uid) ? '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta-de" data-id="'+j.id+'">Cerrar</button>' : '')+
+          (j.estado==='abierta' && !esD ? '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta-de" data-id="'+j.id+'">Cerrar</button>' : '')+
         '</div>'+
       '</div></div>';
     }).join('') : '<div class="empty" style="padding:16px;">Esta ruta no se ha iniciado todavía.</div>';
@@ -3586,13 +3697,29 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>'+
         (cm.id ? '<button class="btn btn-danger btn-block" style="margin-top:10px;" data-action="eliminar-compra">Eliminar factura de compra</button>' : '');
+    } else if(state.modal.type==='confirmar-cierre'){
+      var jx = state.jornadas.find(function(j){ return j.id===state.modal.jornadaId; }) || {};
+      var rx = resumenJornada(jx);
+      var cartX = Object.values(state.cart).reduce(function(a,b){return a+b;},0);
+      html = '<div style="text-align:center;padding:6px 0 4px;">'+
+          '<div style="font-size:56px;line-height:1;">⚠️</div>'+
+          '<h3 style="margin:12px 0 6px;">¿Estás seguro que ya deseas cerrar esta ruta?</h3>'+
+          '<div class="product-name" style="font-size:18px;">'+esc(jx.rutaNombre||'')+'</div>'+
+          '<div class="small muted" style="margin-top:6px;">'+rx.facturas+' factura(s) · <span class="mono">'+fmtCOP(rx.totalVendido)+'</span>'+(jx.iniciadaPorNombre?' · iniciada por '+esc(jx.iniciadaPorNombre):'')+'</div>'+
+        '</div>'+
+        '<div class="small" style="background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:10px;padding:10px;margin:14px 0;">'+
+          'La ruta se cierra para todos (vendedor y administrador). Después de cerrarla no se pueden agregar ventas a esta salida.'+
+          (cartX ? '<br><strong>Tienes '+cartX+' producto(s) en un pedido sin facturar; se descartan.</strong>' : '')+
+        '</div>'+
+        '<button class="btn btn-danger btn-block" data-action="confirmar-cerrar-ruta">Sí, cerrar la ruta</button>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">No, seguir en la ruta</button>';
     } else if(state.modal.type==='balance-ruta'){
       var jm = state.modal.jornada;
       var hayVentasJ = state.ventas.some(function(v){ return v.jornadaId===jm.id; });
       var rm = (jm.estado==='cerrada' && jm.resumen && !hayVentasJ) ? jm.resumen : resumenJornada(jm);
       var filaB = function(etq, val, color, fuerte){ return '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border);"><span class="small'+(fuerte?'':' muted')+'"'+(fuerte?' style="font-weight:700;"':'')+'>'+etq+'</span><span class="mono" style="font-weight:'+(fuerte?'800':'600')+';'+(color?('color:'+color+';'):'')+'">'+val+'</span></div>'; };
       html = '<h3>Balance · '+esc(jm.rutaNombre)+'</h3>'+
-        '<div class="small muted" style="margin-bottom:12px;">'+esc(jm.iniciadaPorNombre||'')+' · '+fmtFecha(jm.iniciadaEn)+(jm.cerradaEn?(' → '+horaCorta(jm.cerradaEn)):' · en curso')+'</div>'+
+        '<div class="small muted" style="margin-bottom:12px;">'+(esJornadaDespachos(jm) && jm.mes ? esc(nombreMes(jm.mes))+(jm.estado==='abierta'?' · mes en curso':' · mes cerrado') : esc(jm.iniciadaPorNombre||'')+' · '+fmtFecha(jm.iniciadaEn)+(jm.cerradaEn?(' → '+horaCorta(jm.cerradaEn)):' · en curso'))+'</div>'+
         '<div class="kpi-grid">'+
           '<div class="kpi"><div class="num mono">'+fmtCOP(rm.totalVendido)+'</div><div class="lbl">Total vendido · '+rm.facturas+' factura(s)</div></div>'+
           '<div class="kpi"><div class="num mono" style="color:var(--red)">'+fmtCOP(rm.saldoPendiente)+'</div><div class="lbl">'+(jm.estado==='cerrada'?'Deben todavía':'Quedaron debiendo')+'</div></div>'+
@@ -3830,20 +3957,39 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='iniciar-ruta'){
       var rIni = rutaById(id);
       if(!rIni) return;
-      if(miJornada()){ toast('Ya tienes una ruta abierta'); return; }
+      var yaAb = rutasAbiertas();
+      var mismaAb = yaAb.find(function(j){ return j.rutaId===id; });
+      if(mismaAb){
+        state.enDespachos = false; state.jornadaSelId = mismaAb.id; render(); window.scrollTo(0,0);
+        toast(rIni.nombre+' ya estaba abierta'+(mismaAb.iniciadaPorNombre?' por '+mismaAb.iniciadaPorNombre:'')+'. Estás en la misma ruta.');
+        return;
+      }
+      if(yaAb.length){ toast('Ya está abierta la ruta '+yaAb[0].rutaNombre+'. Ciérrala antes de iniciar otra.'); state.enDespachos = false; render(); return; }
       if(!confirm('¿Iniciar '+rIni.nombre+'?')) return;
       iniciarRuta(id); render(); window.scrollTo(0,0);
       var nEnc = encargosPendientes(id).length;
       toast(rIni.nombre+' iniciada'+(nEnc?(' · 📦 Esta ruta tiene '+nEnc+' encargo'+(nEnc===1?'':'s')+' pendiente'+(nEnc===1?'':'s')):''));
     }
-    else if(action==='cerrar-ruta'){
-      var jc = miJornada(); if(!jc) return;
-      var cartN = Object.values(state.cart).reduce(function(a,b){return a+b;},0);
-      if(!confirm('¿Cerrar '+jc.rutaNombre+'?'+(cartN?('\n\nTienes '+cartN+' producto(s) en un pedido sin facturar; se descartan.'):'')+'\n\nDespués de cerrarla no se pueden agregar ventas a esta ruta.')) return;
-      var cerrada = cerrarJornada(jc);
+    else if(action==='cerrar-ruta' || action==='cerrar-ruta-de'){
+      var jc = action==='cerrar-ruta' ? miJornada() : state.jornadas.find(function(j){ return j.id===id; });
+      if(!jc || jc.estado!=='abierta' || esJornadaDespachos(jc)) return;
+      state.modal = { type:'confirmar-cierre', jornadaId:jc.id }; render();
+    }
+    else if(action==='confirmar-cerrar-ruta' && state.modal && state.modal.type==='confirmar-cierre'){
+      var jcc = state.jornadas.find(function(j){ return j.id===state.modal.jornadaId; });
+      if(!jcc || jcc.estado!=='abierta'){ state.modal = null; render(); toast('Esa ruta ya estaba cerrada'); return; }
+      var cerrada = cerrarJornada(jcc);
+      state.jornadaSelId = null;
       state.modal = {type:'balance-ruta', jornada:cerrada};
       render();
     }
+    else if(action==='entrar-despachos'){
+      if(!rutaDespachos()){ toast('Crea una ruta llamada «Despachos» en Clientes'); return; }
+      state.enDespachos = true; state.selectedClienteId = null; render(); window.scrollTo(0,0);
+    }
+    else if(action==='salir-despachos'){ state.enDespachos = false; state.selectedClienteId = null; render(); window.scrollTo(0,0); }
+    else if(action==='sel-jornada'){ state.enDespachos = false; state.jornadaSelId = id; state.selectedClienteId = null; render(); window.scrollTo(0,0); }
+    else if(action==='balance-despachos'){ var jbd = miJornada(); if(jbd){ state.modal = {type:'balance-ruta', jornada:jbd}; render(); } }
     else if(action==='compartir-archivo'){ if(state.modal && state.modal.file) compartirArchivo(state.modal.file); }
     else if(action==='exportar-ventas'){
       var ymV = state.contaMes || mesActual();
@@ -4081,12 +4227,6 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='ver-balance'){
       var jb = state.jornadas.find(function(j){ return j.id===id; });
       if(jb){ state.modal = {type:'balance-ruta', jornada:jb}; render(); }
-    }
-    else if(action==='cerrar-ruta-de'){
-      var jo = state.jornadas.find(function(j){ return j.id===id; });
-      if(!jo || jo.estado!=='abierta') return;
-      if(!confirm('¿Cerrar la ruta '+jo.rutaNombre+' de '+(jo.iniciadaPorNombre||'')+'?')) return;
-      state.modal = {type:'balance-ruta', jornada:cerrarJornada(jo)}; render();
     }
     else if(action==='actualizar-app'){ actualizarApp(); }
     else if(action==='importar-datos'){ var ii = document.getElementById('import-input'); if(ii) ii.click(); }
