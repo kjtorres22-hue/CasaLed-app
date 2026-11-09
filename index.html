@@ -779,7 +779,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     gastos.forEach(function(g){ r.totalGastos += Number(g.monto)||0; r.gastos.push({concepto:g.concepto, monto:Number(g.monto)||0, nota:g.nota||''}); });
     r.recibido = r.contado + r.abonos;
     // los gastos de ruta se pagan en efectivo; lo que llegó por transferencia ya está en la cuenta
-    r.efectivoNeto = r.efectivo + r.sinMedio - r.totalGastos;
+    // la base que se le dio al vendedor para las devueltas también se devuelve
+    r.base = Number(j.base)||0;
+    r.efectivoNeto = r.efectivo + r.sinMedio - r.totalGastos + r.base;
     r.totalCobrado = r.recibido + r.cobradoDespues;
     return r;
   }
@@ -823,6 +825,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       L.push('  📲 Transferencia: '+fmtCOP(r.transferencia||0));
     }
     L.push('Gastos: '+fmtCOP(r.totalGastos));
+    if(r.base) L.push('Base para devueltas: '+fmtCOP(r.base));
     L.push('*Efectivo a entregar: '+fmtCOP(r.efectivoNeto)+'*');
     if(r.cobradoDespues) L.push('Cobrado después de la ruta: '+fmtCOP(r.cobradoDespues)+' (💵 '+fmtCOP(r.despuesEfectivo||0)+' · 📲 '+fmtCOP(r.despuesTransferencia||0)+')');
     L.push('*'+(j.estado==='cerrada'?'Deben todavía':'Quedaron debiendo')+': '+fmtCOP(r.saldoPendiente)+'*');
@@ -2314,13 +2317,18 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
   }
 
   // Plata de la salida: lo recibido en efectivo (ventas de contado + abonos) menos los gastos = lo que se entrega
-  function cajaJornada(rj){
+  function cajaJornada(rj, j){
     var efectivo = (rj.efectivo||0) + (rj.sinMedio||0);
-    return '<div class="row" style="gap:8px;margin-top:10px;">'+
+    var conBase = j && !esJornadaDespachos(j);
+    return (conBase ? '<div class="row between" style="margin-top:10px;padding:8px 10px;border:1px dashed var(--border);border-radius:10px;">'+
+        '<span class="small">💰 Base para devueltas: <strong class="mono">'+fmtCOP(rj.base||0)+'</strong>'+(j.basePor?' <span class="muted">· '+esc(j.basePor)+'</span>':'')+'</span>'+
+        '<button class="btn btn-sm btn-ghost" data-action="abrir-base" data-id="'+j.id+'">'+(rj.base?'Cambiar':'+ Base')+'</button>'+
+      '</div>' : '')+
+      '<div class="row" style="gap:8px;margin-top:10px;">'+
       '<div style="flex:1;background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:10px;padding:8px 10px;">'+
         '<div class="small muted">💵 Efectivo a entregar</div>'+
         '<div class="mono" style="font-size:20px;font-weight:800;color:var(--green);">'+fmtCOP(rj.efectivoNeto)+'</div>'+
-        '<div class="small muted">Recibido '+fmtCOP(efectivo)+(rj.totalGastos ? ' − gastos '+fmtCOP(rj.totalGastos) : '')+'</div>'+
+        '<div class="small muted">Recibido '+fmtCOP(efectivo)+(rj.base ? ' + base '+fmtCOP(rj.base) : '')+(rj.totalGastos ? ' − gastos '+fmtCOP(rj.totalGastos) : '')+'</div>'+
       '</div>'+
       '<div style="flex:0 0 38%;border:1px solid var(--border);border-radius:10px;padding:8px 10px;">'+
         '<div class="small muted">📲 Transferencias</div>'+
@@ -2448,7 +2456,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">Siempre abierta · '+esc(nombreMes(jornada.mes||mesActual()))+' · '+rjD.facturas+' factura(s) · <span class="mono">'+fmtCOP(rjD.totalVendido)+'</span></div></div>'+
           '<button class="btn btn-sm btn-ghost" data-action="balance-despachos">Balance del mes</button>'+
         '</div>'+
-        cajaJornada(rjD)+
+        cajaJornada(rjD, jornada)+
         '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="salir-despachos">'+(abiertaN ? '← Volver a la ruta '+esc(abiertaN.rutaNombre) : '← Elegir otra ruta')+'</button>'+
       '</div>';
     } else if(jornada){
@@ -2460,7 +2468,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="small muted">Iniciada '+horaCorta(jornada.iniciadaEn)+(jornada.iniciadaPorNombre?' por '+esc(jornada.iniciadaPorNombre):'')+' · '+rj.facturas+' factura(s) · <span class="mono">'+fmtCOP(rj.totalVendido)+'</span></div></div>'+
           '<button class="btn btn-sm btn-danger" data-action="cerrar-ruta">Cerrar ruta</button>'+
         '</div>'+
-        cajaJornada(rj)+
+        cajaJornada(rj, jornada)+
         (otrasAb.length ? '<div class="small" style="margin-top:8px;">También abierta: '+otrasAb.map(function(j){ return '<button class="link-btn" style="padding:0;" data-action="sel-jornada" data-id="'+j.id+'">'+esc(j.rutaNombre)+'</button>'; }).join(' · ')+'</div>' : '')+
         (rutaDespachos() ? '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="entrar-despachos">📦 Ir a '+esc(rutaDespachos().nombre)+'</button>' : '')+
         avisoEncargosRuta(jornada.rutaId)+
@@ -3715,6 +3723,13 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
         '</div>'+
         (cm.id ? '<button class="btn btn-danger btn-block" style="margin-top:10px;" data-action="eliminar-compra">Eliminar factura de compra</button>' : '');
+    } else if(state.modal.type==='base-ruta'){
+      var jbM = state.jornadas.find(function(j){ return j.id===state.modal.jornadaId; }) || {};
+      html = '<h3>💰 Base para devueltas</h3>'+
+        '<div class="small muted" style="margin-bottom:12px;">Plata que se le entrega al vendedor al salir a '+esc(jbM.rutaNombre||'la ruta')+' para dar las devueltas. Se suma al efectivo a entregar, porque al final se devuelve.</div>'+
+        '<div class="field"><label>Valor de la base</label><input id="base-monto" type="text" inputmode="numeric" value="'+(Number(jbM.base)||'')+'" placeholder="Ej: 100000"></div>'+
+        '<button class="btn btn-primary btn-block" data-action="guardar-base">Guardar base</button>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cancelar</button>';
     } else if(state.modal.type==='confirmar-cierre'){
       var jx = state.jornadas.find(function(j){ return j.id===state.modal.jornadaId; }) || {};
       var rx = resumenJornada(jx);
@@ -3751,6 +3766,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
             filaB('💵 En efectivo'+(rm.sinMedio?' <span class="muted">(incluye '+fmtCOP(rm.sinMedio)+' sin medio registrado)</span>':''), fmtCOP((rm.efectivo||0)+(rm.sinMedio||0)))+
             filaB('📲 Por transferencia', fmtCOP(rm.transferencia||0)) : '')+
           filaB('Gastos de ruta', '− '+fmtCOP(rm.totalGastos), 'var(--red)')+
+          (rm.base ? filaB('💰 Base para devueltas (se devuelve)', '+ '+fmtCOP(rm.base)) : '')+
           filaB('Efectivo a entregar', fmtCOP(rm.efectivoNeto), 'var(--green)', true)+
         '</div>'+
         ((rm.credito || rm.cobradoDespues) ? '<h2 class="section-title">Créditos de esta ruta</h2><div class="card" style="padding:10px 14px;">'+
@@ -4000,6 +4016,21 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.jornadaSelId = null;
       state.modal = {type:'balance-ruta', jornada:cerrada};
       render();
+    }
+    else if(action==='abrir-base'){
+      var jbA = state.jornadas.find(function(j){ return j.id===id; });
+      if(!jbA || jbA.estado!=='abierta'){ toast('Esa ruta ya está cerrada'); return; }
+      state.modal = { type:'base-ruta', jornadaId:id }; render();
+      setTimeout(function(){ var ib = document.getElementById('base-monto'); if(ib) ib.focus(); }, 50);
+    }
+    else if(action==='guardar-base' && state.modal && state.modal.type==='base-ruta'){
+      var montoB = Math.max(0, Math.round(Number(String((document.getElementById('base-monto')||{}).value||'').replace(/[^0-9]/g,''))||0));
+      var jbG = state.jornadas.find(function(j){ return j.id===state.modal.jornadaId; });
+      if(!jbG){ state.modal = null; render(); return; }
+      var cambiosB = { base:montoB, basePor:nombreUsuario(), baseEn:todayISO() };
+      enSegundoPlano(updateDoc(doc(fs, 'jornadas/'+jbG.id), cambiosB));
+      Object.assign(jbG, cambiosB);
+      state.modal = null; render(); toast(montoB ? 'Base de '+fmtCOP(montoB)+' anotada' : 'Base quitada');
     }
     else if(action==='entrar-despachos'){
       if(!rutaDespachos()){ toast('Crea una ruta llamada «Despachos» en Clientes'); return; }
