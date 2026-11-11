@@ -2778,7 +2778,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<span class="product-name">'+esc(m.productoNombre)+'</span>'+
           '<span class="badge badge-garantia">-'+m.cantidad+'</span>'+
         '</div>'+
-        '<div class="small muted" style="margin-top:3px;">'+fmtFecha(m.fecha)+(m.clienteNombre?(' · '+esc(m.clienteNombre)):'')+(m.nota?(' · '+esc(m.nota)):'')+'</div>'+
+        (m.clienteNombre ? '<div class="small" style="margin-top:3px;">👤 <strong>'+esc(m.clienteNombre)+'</strong></div>' : '')+
+        '<div class="small muted" style="margin-top:3px;">'+fmtFecha(m.fecha)+(m.nota?(' · '+esc(m.nota)):'')+'</div>'+
       '</div>';
     }).join('') : '<div class="empty">No se han registrado garantías.</div>';
 
@@ -3868,7 +3869,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     } else if(state.modal.type==='nueva-garantia'){
       var gSelId = state.modal.selectedProductoId || (state.productos[0] && state.productos[0].id);
       var gSel = productoById(gSelId);
+      var gCli = state.modal.clienteId || '';
       html = '<h3>Registrar garantía</h3>'+
+        '<div class="field"><label>Cliente que entrega la garantía</label><select id="mg-cliente">'+
+          '<option value="">Elige el cliente…</option>'+
+          (function(){ var f0 = state.filtroMunicipio; state.filtroMunicipio = null; var o = opcionesClientesPorMunicipio(ordenAlfabetico(state.clientes), gCli); state.filtroMunicipio = f0; return o; })()+
+        '</select></div>'+
         '<div class="field"><label>Producto</label><select id="mg-producto">'+
           state.productos.map(function(p){return '<option value="'+p.id+'"'+(p.id===gSelId?' selected':'')+'>'+esc(p.nombre)+' (stock '+p.stock+')</option>';}).join('')+
         '</select></div>'+
@@ -3876,12 +3882,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<div class="field"><label>Color</label><select id="mg-color">'+
             gSel.colores.map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+' (stock '+((gSel.stockPorColor&&gSel.stockPorColor[c])||0)+')</option>';}).join('')+
           '</select></div>' : '')+
-        '<div class="field"><label>Cantidad</label><input id="mg-cantidad" type="number" value="1" min="1"></div>'+
-        '<div class="field"><label>Cliente (opcional)</label><select id="mg-cliente">'+
-          '<option value="">Sin cliente</option>'+
-          state.clientes.map(function(c){return '<option value="'+c.id+'">'+esc(c.nombre)+'</option>';}).join('')+
-        '</select></div>'+
-        '<div class="field"><label>Motivo / nota</label><input id="mg-nota" placeholder="Ej: falla de fábrica"></div>'+
+        '<div class="field"><label>Cantidad</label><input id="mg-cantidad" type="number" value="'+esc(state.modal.cantidad||'1')+'" min="1"></div>'+
+        '<div class="field"><label>Motivo / nota</label><input id="mg-nota" value="'+esc(state.modal.nota||'')+'" placeholder="Ej: falla de fábrica"></div>'+
         '<div class="row" style="margin-top:10px;">'+
           '<button class="btn btn-primary" style="flex:1" data-action="guardar-garantia">Registrar</button>'+
           '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
@@ -4475,7 +4477,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     else if(action==='abrir-nuevo-producto'){ state.modal={type:'nuevo-producto'}; render(); }
     else if(action==='abrir-editar-producto'){ state.modal={type:'editar-producto', producto:productoById(id)}; render(); }
     else if(action==='abrir-entrada'){ state.modal={type:'entrada', productoId:id}; render(); }
-    else if(action==='abrir-nueva-garantia'){ state.modal={type:'nueva-garantia'}; render(); }
+    else if(action==='abrir-nueva-garantia'){ state.modal={type:'nueva-garantia', clienteId: state.selectedClienteId || ''}; render(); }
     else if(action==='abrir-nuevo-gasto'){ state.modal={type:'nuevo-gasto'}; render(); }
     else if(action==='filtro-gasto-ruta'){ state.gastoFiltroRuta = t.getAttribute('data-ruta'); render(); }
     else if(action==='eliminar-gasto'){
@@ -4550,6 +4552,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var notaG = document.getElementById('mg-nota').value;
       var colorElG = document.getElementById('mg-color');
       var colorG = colorElG ? colorElG.value : null;
+      if(!cliId){ toast('Elige el cliente que entrega la garantía'); var selC = document.getElementById('mg-cliente'); if(selC) selC.focus(); return; }
       if(!prodId || cantG<=0){ toast('Completa producto y cantidad'); return; }
       await registrarGarantia(prodId, cantG, cliId, notaG, colorG);
       state.modal=null; render(); toast('Garantía registrada');
@@ -4762,9 +4765,15 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.modal.nc.rutaId = e.target.value;
     }
     else if(e.target.id==='mg-producto'){
+      // conservar lo ya escrito al cambiar de producto
+      var mgC = document.getElementById('mg-cliente'), mgN = document.getElementById('mg-cantidad'), mgT = document.getElementById('mg-nota');
+      if(mgC) state.modal.clienteId = mgC.value;
+      if(mgN) state.modal.cantidad = mgN.value;
+      if(mgT) state.modal.nota = mgT.value;
       state.modal.selectedProductoId = e.target.value;
       render();
     }
+    else if(e.target.id==='mg-cliente' && state.modal && state.modal.type==='nueva-garantia'){ state.modal.clienteId = e.target.value; }
     else if(e.target.id==='bulk-foto-input'){
       var files = Array.prototype.slice.call(e.target.files||[]);
       if(!files.length) return;
