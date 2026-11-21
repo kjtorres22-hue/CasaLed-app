@@ -312,6 +312,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
 
   var state = {
     ready:false, dbOk:null, servidor:{}, enDespachos:false, jornadaSelId:null,
+    cotizaciones:[], cotizando:false, guardadoVenta:null, guardadoCot:null, cotFacturando:null,
     productos:[], clientes:[], rutas:[], movimientos:[], ventas:[], gastos:[], config:null,
     activeTab:'vender',
     cart:{}, // productoId -> cantidad
@@ -342,7 +343,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     editandoVenta: null
   };
   var unsub = [];
-  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia','pd-ruta','pd-sugerir','ver-proveedor','editar-proveedor','guardar-proveedor','pedido-proveedor','leer-compra-ia'];
+  var ADMIN_ACTIONS = ['abrir-nuevo-producto','abrir-editar-producto','abrir-entrada','eliminar-producto','guardar-empresa','trigger-bulk-fotos','mover-arriba','mover-abajo','toggle-reordenar','cambiar-rol','importar-datos','crear-ruta','eliminar-ruta','guardar-numeracion','editar-factura','eliminar-factura','editar-gasto','abrir-incluir-facturas','incluir-facturas','exportar-ventas','exportar-compras','nueva-compra','editar-compra','adjuntar-compra','ver-compra','guardar-compra','eliminar-compra','agregar-factura-compra','pegar-compra-portapapeles','elegir-archivo-compra','aplicar-compra','compra-solo-archivar','leer-rut','marcar-pagado','abrir-cobros','abrir-pedido','cerrar-pedido','limpiar-pedido','generar-pedido','eliminar-encargo','abrir-valor-inventario','exportar-valor-inventario','abrir-ajuste','guardar-ajuste','guardar-clave-ia','quitar-clave-ia','pd-ruta','pd-sugerir','ver-proveedor','editar-proveedor','guardar-proveedor','pedido-proveedor','leer-compra-ia','pedir-faltantes','eliminar-cotizacion'];
   var sampleApi = null; // el análisis con IA solo existía dentro de Claude
 
   function mensajeError(err){
@@ -491,7 +492,8 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var pid = parts[0], color = parts[1]||null;
       var p = productoById(pid);
       var cant = state.cart[key];
-      var orig = state.editandoVenta ? (state.editandoVenta.items||[]).find(function(it){ return claveItem(it)===key; }) : null;
+      var orig = state.editandoVenta ? (state.editandoVenta.items||[]).find(function(it){ return claveItem(it)===key; })
+        : (state.cotFacturando ? (state.cotFacturando.items||[]).find(function(it){ return claveItem(it)===key; }) : null);
       var nombre = orig ? orig.nombre : ((p?p.nombre:'') + (color?(' - '+color):''));
       var precio = orig ? (Number(orig.precio)||0) : (p?Number(p.costoVenta)||0:0);
       return {productoId:pid, nombre:nombre, color:color, cantidad:cant, precio:precio, subtotal:cant*precio};
@@ -589,6 +591,10 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.encargos = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render({preservar:true});
     }, function(){ state.encargos = []; });
+    db.collection('cotizaciones').orderBy('fecha','desc').limit(200).onSnapshot(function(snap){
+      state.cotizaciones = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      render({preservar:true});
+    }, function(){ state.cotizaciones = []; });
     db.collection('jornadas').orderBy('iniciadaEn','desc').limit(60).onSnapshot(function(snap){
       var antes = state.enDespachos ? null : miJornada();
       state.jornadas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
@@ -1274,6 +1280,12 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       state.checkoutTransf = 0; state.checkoutComprobante = null;
       state.checkoutPlazo = 8;
       state.checkoutComentarios = '';
+      if(state.cotFacturando){
+        var cotHecha = state.cotFacturando;
+        enSegundoPlano(updateDoc(doc(fs, 'cotizaciones/'+cotHecha.id), { estado:'facturada', ventaId:ventaRef.id, ventaNumero:numero, facturadaEn:fecha, facturadaPor:nombreUsuario() }));
+        state.cotizaciones = state.cotizaciones.map(function(c){ return c.id===cotHecha.id ? Object.assign({}, c, { estado:'facturada', ventaId:ventaRef.id, ventaNumero:numero }) : c; });
+        state.cotFacturando = null;
+      }
       abrirFactura(Object.assign({id:ventaRef.id}, ventaDoc), cliente, true);
     }catch(e){
       reportarError(e);
@@ -2084,7 +2096,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
     if(!f){ toast('Preparando el PDF, espera un segundo…'); return; }
     // el mensaje (saldo, vencimiento y "responde ACEPTO" en créditos) va junto con el PDF
     var mvS = state.modal.venta, mcS = state.modal.cliente;
-    var textoS = (mvS && mcS) ? mensajeWhatsapp(mvS, mcS) : '';
+    var textoS = (mvS && mcS) ? (state.modal.type==='cotizacion' ? mensajeCotizacion(state.modal.cot, mcS) : mensajeWhatsapp(mvS, mcS)) : '';
     if(navigator.canShare && navigator.share && navigator.canShare({files:[f]})){
       var datosS = textoS && navigator.canShare({files:[f], text:textoS}) ? {files:[f], text:textoS} : {files:[f], title:f.name};
       navigator.share(datosS).catch(function(err){
@@ -2226,7 +2238,9 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       },0);
       cartSlot.innerHTML = '<div class="cart-bar"><div class="cart-inner">'+
         '<span>'+cartCount+' und · '+fmtCOP(totalCarrito)+'</span>'+
-        '<button class="btn" style="background:#04070C;color:#2B8CFF;" data-action="abrir-revisar-factura">'+(state.editandoVenta?'Revisar cambios':'Revisar factura')+'</button>'+
+        (state.cotizando && !state.editandoVenta
+          ? '<button class="btn" style="background:#04070C;color:#2B8CFF;" data-action="abrir-revisar-cotizacion">Revisar cotización</button>'
+          : '<button class="btn" style="background:#04070C;color:#2B8CFF;" data-action="abrir-revisar-factura">'+(state.editandoVenta?'Revisar cambios':'Revisar factura')+'</button>')+
         '</div></div>';
     } else {
       cartSlot.innerHTML = '';
@@ -2337,11 +2351,155 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       '</div>'+
     '</div>';
   }
+  // ---------- COTIZACIONES ----------
+  // Se puede cotizar sin stock; la app muestra en vivo cuánto falta para poder facturarla.
+  function stockDe(pid, color){
+    var p = productoById(pid); if(!p) return 0;
+    return (color && p.colores && p.colores.length) ? ((p.stockPorColor && Number(p.stockPorColor[color])) || 0) : (Number(p.stock)||0);
+  }
+  function faltantesDe(items){
+    var pide = {};
+    (items||[]).forEach(function(it){
+      var p = productoById(it.productoId);
+      var conColor = it.color && p && p.colores && p.colores.length;
+      var k = it.productoId + '|' + (conColor ? it.color : '');
+      pide[k] = (pide[k]||0) + (Number(it.cantidad)||0);
+    });
+    return Object.keys(pide).map(function(k){
+      var pr = k.split('|'), pid = pr[0], color = pr[1] || null;
+      var p = productoById(pid), st = Math.max(0, stockDe(pid, color));
+      return { productoId:pid, color:color, nombre:(p ? p.nombre : 'Producto borrado')+(color ? ' - '+color : ''), pide:pide[k], stock:st, falta:pide[k]-st, existe:!!p };
+    }).filter(function(x){ return x.falta > 0; }).sort(function(a,b){ return a.nombre.localeCompare(b.nombre, 'es'); });
+  }
+  function numeroCot(c){ return 'COT-'+c.numero; }
+  function estadoCot(c){
+    if(c.estado==='facturada') return { txt:'Facturada #'+(c.ventaNumero||''), color:'var(--muted)' };
+    var f = faltantesDe(c.items);
+    return f.length ? { txt:'Faltan '+f.reduce(function(s,x){ return s+x.falta; },0)+' und', color:'var(--red)', faltan:f } : { txt:'✓ Lista para facturar', color:'var(--green)', faltan:[] };
+  }
+  function botonCotizar(){
+    var pend = state.cotizaciones.filter(function(c){ return c.estado!=='facturada'; });
+    var listas = pend.filter(function(c){ return !faltantesDe(c.items).length; }).length;
+    return '<div class="row" style="gap:8px;margin-bottom:12px;">'+
+      '<button class="btn btn-ghost" style="flex:1" data-action="iniciar-cotizacion">📝 Hacer cotización</button>'+
+      (state.cotizaciones.length ? '<button class="btn '+(listas?'btn-primary':'btn-ghost')+'" style="flex:1" data-action="ver-cotizaciones">Cotizaciones'+(pend.length?' · '+pend.length:'')+(listas?' ('+listas+' lista'+(listas===1?'':'s')+')':'')+'</button>' : '')+
+    '</div>';
+  }
+  function cambiarModoCotizar(entrar){
+    if(entrar === state.cotizando) return;
+    var actual = { cart:state.cart, cli:state.selectedClienteId, com:state.checkoutComentarios };
+    var otro = entrar ? (state.guardadoCot || {}) : (state.guardadoVenta || {});
+    if(entrar) state.guardadoVenta = actual; else state.guardadoCot = actual;
+    state.cart = otro.cart || {}; state.selectedClienteId = otro.cli || null; state.checkoutComentarios = otro.com || '';
+    state.cotizando = entrar;
+  }
+  function renderCotizar(){
+    var clienteSel = clienteById(state.selectedClienteId);
+    var itemsC = buildCartItems();
+    var faltC = faltantesDe(itemsC);
+    var todos = state.clientes.slice();
+    var productosHtml = state.productos.length ? state.productos.map(function(p){
+      var fila = function(key, color, etiqueta){
+        var enC = state.cart[key]||0, st = stockDe(p.id, color);
+        var falta = enC - Math.max(0, st);
+        return '<div class="row between" style="padding:4px 0;">'+
+          '<span class="small">'+etiqueta+' <span class="muted">(stock '+st+')</span>'+(falta > 0 ? ' <strong style="color:var(--red);">· faltan '+falta+'</strong>' : '')+'</span>'+
+          '<div class="qty-control">'+
+            '<button class="qty-btn" data-action="cart-dec" data-id="'+key+'">–</button>'+
+            '<input class="qty-val qty-input" id="qty-'+esc(key)+'" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-id="'+esc(key)+'" value="'+enC+'">'+
+            '<button class="qty-btn" data-action="cart-inc" data-id="'+key+'">+</button>'+
+          '</div>'+
+        '</div>';
+      };
+      var filas = (p.colores && p.colores.length) ? p.colores.map(function(c){ return fila(p.id+'|'+c, c, esc(c)); }).join('') : fila(p.id, null, 'Cantidad');
+      return '<div class="product-row" style="flex-direction:column;align-items:stretch;">'+
+        '<div class="row" style="margin-bottom:4px;">'+
+          (p.imagenUrl ? '<img src="'+esc(p.imagenUrl)+'" style="width:40px;height:40px;flex-shrink:0;object-fit:cover;border-radius:8px;border:1px solid var(--border);">' : '')+
+          '<div><div class="product-name">'+esc(p.nombre)+'</div><div class="product-sub">'+fmtCOP(p.costoVenta)+'</div></div>'+
+        '</div>'+filas+
+      '</div>';
+    }).join('') : '<div class="empty">Aún no tienes productos.</div>';
+    return '<div class="card" style="border-color:var(--blue);">'+
+        '<div class="row between">'+
+          '<div><div class="product-name">📝 Nueva cotización</div>'+
+          '<div class="small muted">No descuenta inventario. Puedes cotizar aunque no haya stock.</div></div>'+
+          '<button class="btn btn-sm btn-ghost" data-action="salir-cotizacion">Salir</button>'+
+        '</div>'+
+        (state.cotizaciones.length ? (function(){
+          var listasV = state.cotizaciones.filter(function(c){ return c.estado!=='facturada' && !faltantesDe(c.items).length; }).length;
+          return '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="ver-cotizaciones">Ver cotizaciones guardadas'+(listasV?' ('+listasV+' lista'+(listasV===1?'':'s')+' para facturar)':'')+'</button>';
+        })() : '')+
+      '</div>'+
+      (faltC.length ? '<div class="card" style="border-color:var(--red);">'+
+        '<div class="small" style="font-weight:800;color:var(--red);margin-bottom:4px;">⚠️ Para poder facturarla te faltan:</div>'+
+        faltC.map(function(x){ return '<div class="row between small" style="padding:2px 0;"><span>'+esc(x.nombre)+'</span><span class="mono"><strong style="color:var(--red);">'+x.falta+'</strong> <span class="muted">(pide '+x.pide+', hay '+x.stock+')</span></span></div>'; }).join('')+
+      '</div>' : '')+
+      '<div class="card"><label>Cliente (también lo puedes elegir o crear al final)</label>'+
+        selectorMunicipio(todos)+
+        '<select id="sel-cliente"><option value="">Selecciona un cliente…</option>'+opcionesClientesPorMunicipio(todos, state.selectedClienteId)+'</select>'+
+        (clienteSel ? '<div class="small" style="margin-top:6px;font-weight:600;">🕒 '+esc(textoUltimaCompra(clienteSel.id))+'</div>' : '')+
+      '</div>'+
+      '<h2 class="section-title">Productos</h2><div class="card">'+productosHtml+'</div>';
+  }
+  function htmlBloqueCliente(listaCli){
+    var nc = state.modal.nc || {};
+    return state.modal.crearCliente ?
+        ('<div class="card" style="padding:12px;margin-bottom:12px;">'+
+          '<div class="row between" style="margin-bottom:8px;"><strong class="small">Cliente nuevo</strong>'+
+          '<button class="link-btn" data-action="rf-elegir-existente">Elegir uno existente</button></div>'+
+          '<div class="field"><label>Nombre *</label><input id="rf-nc-nombre" value="'+esc(nc.nombre||'')+'"></div>'+
+          '<div class="field"><label>Teléfono (WhatsApp)</label><input id="rf-nc-telefono" inputmode="tel" value="'+esc(nc.telefono||'')+'" placeholder="Ej: 3001234567"></div>'+
+          '<div class="field-row">'+
+            '<div class="field"><label>NIT / CC</label><input id="rf-nc-documento" inputmode="numeric" value="'+esc(nc.documento||'')+'"></div>'+
+            '<div class="field"><label>Municipio</label><input id="rf-nc-ciudad" value="'+esc(nc.ciudad||'')+'"></div>'+
+          '</div>'+
+          '<div class="field"><label>Dirección</label><input id="rf-nc-direccion" value="'+esc(nc.direccion||'')+'"></div>'+
+          '<div class="field" style="margin-bottom:0;"><label>Ruta</label><select id="rf-nc-rutaId">'+
+            '<option value="">Sin ruta</option>'+
+            state.rutas.map(function(r){ var sel = (nc.rutaId!=null ? nc.rutaId===r.id : state.selectedRutaId===r.id); return '<option value="'+r.id+'"'+(sel?' selected':'')+'>'+esc(r.nombre)+'</option>'; }).join('')+
+          '</select></div>'+
+        '</div>')
+        :
+        ('<div class="field"><div class="row between"><label style="margin:0 0 5px 2px;">Cliente *</label>'+
+          '<button class="link-btn" data-action="rf-crear-cliente">+ Crear cliente nuevo</button></div>'+
+          selectorMunicipio(listaCli)+
+          '<select id="rf-cliente">'+
+            '<option value="">Elige el cliente…</option>'+
+            opcionesClientesPorMunicipio(listaCli, state.selectedClienteId, function(c){ var ru = rutaById(c.rutaId); return ru ? (' · '+esc(ru.nombre)) : ''; })+
+          '</select>'+
+          (state.selectedClienteId && clienteById(state.selectedClienteId) ? '<div class="small" style="margin-top:6px;font-weight:600;">🕒 '+esc(textoUltimaCompra(state.selectedClienteId))+'</div>' : '')+
+          '</div>');
+  }
+  function bannerCotFacturando(){
+    var c = state.cotFacturando; if(!c) return '';
+    return '<div class="card" style="border-color:var(--green);">'+
+      '<div class="row between"><div><div class="product-name">🧾 Facturando '+esc(numeroCot(c))+'</div>'+
+      '<div class="small muted">'+esc(c.clienteNombre||'')+' · se respetan los precios cotizados</div></div>'+
+      '<button class="btn btn-sm btn-ghost" data-action="cancelar-facturar-cot">Cancelar</button></div>'+
+    '</div>';
+  }
+  function mensajeCotizacion(c, cliente){
+    var nom = String((cliente && cliente.nombre) || c.clienteNombre || '').split(' ')[0];
+    return 'Hola '+nom+' 👋, te saluda '+((cfgEmpresa().empresaNombre)||'Casa LED')+'. Te compartimos la cotización N.° '+numeroCot(c)+' por '+fmtCOP(c.total)+
+      '. Vigencia: sujeta a disponibilidad de inventario. ¡Quedamos atentos para despachar tu pedido! 🙌';
+  }
+  function abrirCotizacion(c, cliente, nueva){
+    cliente = cliente || clienteById(c.clienteId) || { nombre:c.clienteNombre, telefono:c.clienteTelefono };
+    var m = { type:'cotizacion', cotId:c.id, cot:c, cliente:cliente, nueva:!!nueva, pdf:null, pdfError:false,
+      venta:Object.assign({}, c, { numero:numeroCot(c), esCotizacion:true, vendedorNombre:c.creadoPorNombre||'' }) };
+    state.modal = m; render();
+    var datos = datosPdf(m.venta, cliente); datos.cotizacion = true;
+    generarFacturaPDF(datos).then(function(blob){
+      m.pdf = new File([blob], 'Cotizacion-'+numeroCot(c)+'-CasaLED.pdf', {type:'application/pdf'});
+      if(state.modal===m) render();
+    }).catch(function(err){ console.error(err); m.pdfError = true; if(state.modal===m) render(); });
+  }
   function botonEncargos(){
     var n = encargosPendientes(null).length;
     return '<button class="btn '+(n?'btn-primary':'btn-ghost')+' btn-block" style="margin-bottom:12px;" data-action="abrir-encargos">📦 Encargos'+(n?(' · '+n+' pendiente'+(n===1?'':'s')):'')+'</button>';
   }
   function renderVender(){
+    if(state.cotizando && !state.editandoVenta) return renderCotizar();
     var jornada = state.editandoVenta ? null : miJornada();
     if(!state.editandoVenta && !jornada){
       // Sin ruta iniciada no se puede vender
@@ -2349,7 +2507,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       var jdHoy = rDesp ? jornadaDespachosMes() : null;
       var rjd = jdHoy ? resumenJornada(jdHoy) : null;
       var rutasNormales = state.rutas.filter(function(r){ return !esRutaDespachos(r.id); });
-      return botonEncargos()+
+      return botonEncargos()+botonCotizar()+bannerCotFacturando()+
         (rDesp ? '<div class="card row between" style="border-color:var(--blue);">'+
           '<div><div class="product-name">📦 '+esc(rDesp.nombre)+'</div>'+
             '<div class="small muted">Siempre abierta · '+esc(nombreMes(mesActual()))+' · '+rjd.facturas+' factura(s) · <span class="mono">'+fmtCOP(rjd.totalVendido)+'</span></div></div>'+
@@ -2476,7 +2634,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
           '<button class="link-btn" style="margin-top:8px;padding:0;" data-action="abrir-incluir-facturas">+ Incluir facturas hechas antes ('+ventasSinSalida().length+')</button>' : '')+
       '</div>';
     }
-    return (state.editandoVenta ? '' : botonEncargos()) + bannerEdicion + bannerJornada + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
+    return (state.editandoVenta ? '' : botonEncargos() + botonCotizar()) + bannerCotFacturando() + bannerEdicion + bannerJornada + (state.editandoVenta ? '' : gastosHtml) + clienteHtml +
       '<h2 class="section-title">Productos</h2>' +
       '<div class="card">'+productosHtml+'</div>';
   }
@@ -3299,33 +3457,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         vence: state.checkoutPago==='credito' ? fechaVencimiento(state.editandoVenta ? state.editandoVenta.fecha : todayISO(), state.checkoutPlazo || 8) : null};
       var saldoRF = Math.max(0, totalRF - (pagoRF.abono||0));
       var previewTexto = textoFactura('(sin asignar)', clienteRF, itemsRF, totalRF, cfgRF, pagoRF);
-      var nc = state.modal.nc || {};
-      var bloqueCliente = state.modal.crearCliente ?
-        ('<div class="card" style="padding:12px;margin-bottom:12px;">'+
-          '<div class="row between" style="margin-bottom:8px;"><strong class="small">Cliente nuevo</strong>'+
-          '<button class="link-btn" data-action="rf-elegir-existente">Elegir uno existente</button></div>'+
-          '<div class="field"><label>Nombre *</label><input id="rf-nc-nombre" value="'+esc(nc.nombre||'')+'"></div>'+
-          '<div class="field"><label>Teléfono (WhatsApp)</label><input id="rf-nc-telefono" inputmode="tel" value="'+esc(nc.telefono||'')+'" placeholder="Ej: 3001234567"></div>'+
-          '<div class="field-row">'+
-            '<div class="field"><label>NIT / CC</label><input id="rf-nc-documento" inputmode="numeric" value="'+esc(nc.documento||'')+'"></div>'+
-            '<div class="field"><label>Municipio</label><input id="rf-nc-ciudad" value="'+esc(nc.ciudad||'')+'"></div>'+
-          '</div>'+
-          '<div class="field"><label>Dirección</label><input id="rf-nc-direccion" value="'+esc(nc.direccion||'')+'"></div>'+
-          '<div class="field" style="margin-bottom:0;"><label>Ruta</label><select id="rf-nc-rutaId">'+
-            '<option value="">Sin ruta</option>'+
-            state.rutas.map(function(r){ var sel = (nc.rutaId!=null ? nc.rutaId===r.id : state.selectedRutaId===r.id); return '<option value="'+r.id+'"'+(sel?' selected':'')+'>'+esc(r.nombre)+'</option>'; }).join('')+
-          '</select></div>'+
-        '</div>')
-        :
-        ('<div class="field"><div class="row between"><label style="margin:0 0 5px 2px;">Cliente *</label>'+
-          '<button class="link-btn" data-action="rf-crear-cliente">+ Crear cliente nuevo</button></div>'+
-          selectorMunicipio(clientesParaVenta())+
-          '<select id="rf-cliente">'+
-            '<option value="">Elige el cliente…</option>'+
-            opcionesClientesPorMunicipio(clientesParaVenta(), state.selectedClienteId, function(c){ var ru = rutaById(c.rutaId); return ru ? (' · '+esc(ru.nombre)) : ''; })+
-          '</select>'+
-          (state.selectedClienteId && clienteById(state.selectedClienteId) ? '<div class="small" style="margin-top:6px;font-weight:600;">🕒 '+esc(textoUltimaCompra(state.selectedClienteId))+'</div>' : '')+
-          '</div>');
+      var bloqueCliente = htmlBloqueCliente(clientesParaVenta());
       html = '<h3>'+(state.editandoVenta?('Editar factura #'+state.editandoVenta.numero):'Revisar factura')+'</h3>'+
         bloqueCliente+
         '<label>Forma de pago</label>'+
@@ -3519,7 +3651,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="cerrar-modal">Cerrar</button>';
     } else if(state.modal.type==='ver-pdf'){
       var vp = state.modal;
-      html = '<h3>Cuenta de cobro #'+esc(vp.venta.numero)+' · '+esc(vp.venta.clienteNombre||'')+'</h3>'+
+      html = '<h3>'+(vp.venta.esCotizacion ? 'Cotización ' : 'Cuenta de cobro #')+esc(vp.venta.numero)+' · '+esc(vp.venta.clienteNombre||'')+'</h3>'+
         (vp.error ? '<div class="small" style="color:var(--red);">No se pudo mostrar el PDF.</div>' :
           (vp.imagenes ? '<div class="visor-pdf'+(vp.zoom?' zoom':'')+'" data-action="zoom-pdf">'+vp.imagenes.map(function(src, i){ return '<img src="'+src+'" alt="Página '+(i+1)+'">'; }).join('')+'</div>'+
             '<div class="small muted" style="margin-top:6px;text-align:center;">Toca la hoja para '+(vp.zoom?'alejar':'acercar')+(vp.imagenes.length>1?(' · '+vp.imagenes.length+' páginas'):'')+'</div>'
@@ -3731,6 +3863,59 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
         '<div class="field"><label>Valor de la base</label><input id="base-monto" type="text" inputmode="numeric" value="'+(Number(jbM.base)||'')+'" placeholder="Ej: 100000"></div>'+
         '<button class="btn btn-primary btn-block" data-action="guardar-base">Guardar base</button>'+
         '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Cancelar</button>';
+    } else if(state.modal.type==='revisar-cotizacion'){
+      var itemsRC = buildCartItems();
+      var totalRC = itemsRC.reduce(function(s2,it){ return s2+it.subtotal; }, 0);
+      var faltRC = faltantesDe(itemsRC);
+      html = '<h3>Revisar cotización</h3>'+
+        htmlBloqueCliente(state.clientes.slice())+
+        '<div class="card" style="padding:10px 12px;margin-bottom:12px;">'+
+          itemsRC.map(function(it){ return '<div class="row between small" style="padding:3px 0;"><span>'+it.cantidad+' × '+esc(it.nombre)+'</span><span class="mono">'+fmtCOP(it.subtotal)+'</span></div>'; }).join('')+
+          '<div class="row between" style="padding-top:6px;margin-top:4px;border-top:1px solid var(--border);"><strong>Total</strong><strong class="mono">'+fmtCOP(totalRC)+'</strong></div>'+
+        '</div>'+
+        (faltRC.length ? '<div class="small" style="background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:10px;padding:10px;margin-bottom:12px;">'+
+          '<strong>Faltan '+faltRC.reduce(function(s2,x){ return s2+x.falta; },0)+' unidades</strong> para poder facturarla (esto solo lo ves tú, no sale en el PDF):<br>'+
+          faltRC.map(function(x){ return '· '+esc(x.nombre)+': faltan <strong>'+x.falta+'</strong>'; }).join('<br>')+'</div>'
+          : '<div class="small" style="color:var(--green);font-weight:700;margin-bottom:12px;">✓ Hay stock de todo: se puede facturar cuando el cliente confirme.</div>')+
+        '<div class="field"><label>Comentarios (opcional, salen en la cotización)</label>'+
+          '<textarea id="rf-comentarios" rows="3" placeholder="Ej: entrega en 8 días, precios por cantidad…">'+esc(state.checkoutComentarios||'')+'</textarea></div>'+
+        '<div class="row" style="margin-top:12px;">'+
+          '<button class="btn btn-primary" style="flex:1" data-action="guardar-cotizacion">Generar cotización</button>'+
+          '<button class="btn btn-ghost" data-action="cerrar-modal">Cancelar</button>'+
+        '</div>';
+    } else if(state.modal.type==='cotizacion'){
+      var cM = state.cotizaciones.find(function(x){ return x.id===state.modal.cotId; }) || state.modal.cot;
+      var clM = state.modal.cliente;
+      var telM = String(clM.telefono||'').replace(/[^0-9]/g,'');
+      var esM = estadoCot(cM);
+      html = '<h3>Cotización '+esc(numeroCot(cM))+(state.modal.nueva?' guardada':'')+'</h3>'+
+        '<div class="small muted" style="margin-bottom:10px;">'+esc(clM.nombre||cM.clienteNombre||'')+' · '+fmtCOP(cM.total)+' · '+fmtFecha(cM.fecha)+(cM.creadoPorNombre?' · '+esc(cM.creadoPorNombre):'')+'</div>'+
+        '<div class="small" style="font-weight:800;color:'+esM.color+';margin-bottom:8px;">'+esc(esM.txt)+'</div>'+
+        (cM.estado!=='facturada' && esM.faltan.length ? '<div class="card" style="border-color:var(--red);padding:10px 12px;">'+
+          '<div class="small" style="font-weight:700;margin-bottom:4px;">Para facturarla te faltan:</div>'+
+          esM.faltan.map(function(x){ return '<div class="row between small" style="padding:2px 0;"><span>'+esc(x.nombre)+'</span><span class="mono"><strong style="color:var(--red);">'+x.falta+'</strong> <span class="muted">(pide '+x.pide+', hay '+x.stock+')</span></span></div>'; }).join('')+
+          (state.isAdmin ? '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="pedir-faltantes">📦 Pedir faltantes al proveedor</button>' : '')+
+        '</div>' : '')+
+        (cM.estado!=='facturada' ? '<button class="btn btn-primary btn-block" style="margin-top:6px;padding:13px;'+(esM.faltan.length?'opacity:.45;':'')+'" data-action="facturar-cotizacion"'+(esM.faltan.length?' disabled':'')+'>🧾 Facturar cotización</button>' : '')+
+        (telM ? '<a class="btn-wa" style="margin-top:10px;" href="'+esc(urlWhatsapp(clM.telefono, mensajeCotizacion(cM, clM)))+'" target="_blank" rel="noopener">Abrir chat de '+esc(String(clM.nombre||'').split(' ')[0])+' en WhatsApp</a>' : '')+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="compartir-pdf" '+(state.modal.pdf?'':'disabled')+'>'+(state.modal.pdf?'Compartir cotización PDF':(state.modal.pdfError?'No se pudo crear el PDF':'Preparando PDF…'))+'</button>'+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="ver-pdf-modal" '+(state.modal.pdf?'':'disabled')+'>👁 Ver cotización</button>'+
+        (state.isAdmin && cM.estado!=='facturada' ? '<button class="btn btn-danger btn-block" style="margin-top:8px;" data-action="eliminar-cotizacion">🗑 Eliminar cotización</button>' : '')+
+        '<button class="btn btn-ghost btn-block" style="margin-top:8px;" data-action="cerrar-modal">Listo</button>';
+    } else if(state.modal.type==='lista-cotizaciones'){
+      var listaLC = state.cotizaciones.slice().sort(function(a,b){
+        var ea = a.estado==='facturada' ? 1 : 0, eb = b.estado==='facturada' ? 1 : 0;
+        return (ea-eb) || String(b.fecha).localeCompare(String(a.fecha));
+      });
+      html = '<h3>Cotizaciones</h3>'+
+        (listaLC.length ? listaLC.slice(0,80).map(function(c){
+          var e2 = estadoCot(c);
+          return '<button class="list-item" style="display:block;width:100%;text-align:left;color:var(--text);background:none;border-left:0;border-right:0;border-top:0;" data-action="abrir-cotizacion" data-id="'+c.id+'">'+
+            '<div class="row between"><span class="product-name">'+esc(numeroCot(c))+' · '+esc(c.clienteNombre||'')+'</span><span class="mono" style="font-weight:700;">'+fmtCOP(c.total)+'</span></div>'+
+            '<div class="small"><span style="color:'+e2.color+';font-weight:700;">'+esc(e2.txt)+'</span> <span class="muted">· '+fmtFecha(c.fecha)+'</span></div>'+
+          '</button>';
+        }).join('') : '<div class="empty">Aún no hay cotizaciones.</div>')+
+        '<button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="cerrar-modal">Cerrar</button>';
     } else if(state.modal.type==='confirmar-cierre'){
       var jx = state.jornadas.find(function(j){ return j.id===state.modal.jornadaId; }) || {};
       var rx = resumenJornada(jx);
@@ -4355,12 +4540,90 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       } else {
         disp = (Number(pInc.stock)||0) + cantidadOriginal(pidInc) - cartTotalForProducto(pidInc);
       }
-      if(disp>0){ state.cart[id]=cur+1; render(); }
+      if(disp>0 || state.cotizando){ state.cart[id]=cur+1; render(); }
     }
     else if(action==='cart-dec'){
       var cur2 = state.cart[id]||0;
       if(cur2<=1) delete state.cart[id]; else state.cart[id]=cur2-1;
       render();
+    }
+    else if(action==='iniciar-cotizacion'){
+      if(state.editandoVenta){ toast('Termina primero la edición de la factura'); return; }
+      cambiarModoCotizar(true); state.activeTab = 'vender'; render(); window.scrollTo(0,0);
+    }
+    else if(action==='salir-cotizacion'){ cambiarModoCotizar(false); render(); window.scrollTo(0,0); }
+    else if(action==='abrir-revisar-cotizacion'){
+      if(!buildCartItems().length){ toast('Agrega productos a la cotización'); return; }
+      state.modal = { type:'revisar-cotizacion' }; render();
+    }
+    else if(action==='guardar-cotizacion'){
+      if(state.guardandoCot) return;
+      var itemsGC = buildCartItems();
+      if(!itemsGC.length){ toast('Agrega productos a la cotización'); return; }
+      var cliGC = null;
+      if(state.modal && state.modal.crearCliente){
+        var ncG = state.modal.nc || {};
+        if(!(ncG.nombre||'').trim()){ toast('Escribe el nombre del cliente nuevo'); return; }
+        cliGC = await crearCliente({ nombre:ncG.nombre.trim(), telefono:(ncG.telefono||'').trim(), direccion:(ncG.direccion||'').trim(),
+          documento:(ncG.documento||'').trim(), ciudad:(ncG.ciudad||'').trim(), rutaId: ncG.rutaId || null });
+      } else {
+        cliGC = clienteById(state.selectedClienteId);
+        if(!cliGC){ toast('Elige el cliente o crea uno nuevo'); return; }
+      }
+      state.guardandoCot = true;
+      try{
+        var numGC = state.cotizaciones.reduce(function(mx, c){ return Math.max(mx, Number(c.numero)||0); }, 0) + 1;
+        var refGC = doc(collection(fs, 'cotizaciones'));
+        var cotGC = { numero:numGC, clienteId:cliGC.id, clienteNombre:cliGC.nombre, clienteTelefono:cliGC.telefono||'',
+          items:itemsGC, total:itemsGC.reduce(function(s2,it){ return s2+it.subtotal; }, 0),
+          comentarios:(state.checkoutComentarios||'').trim(), fecha:todayISO(), estado:'pendiente',
+          creadoPor:state.auth.user.uid, creadoPorNombre:nombreUsuario() };
+        enSegundoPlano(setDoc(refGC, cotGC));
+        var guardadaGC = Object.assign({ id:refGC.id }, cotGC);
+        state.cotizaciones = [guardadaGC].concat(state.cotizaciones);
+        state.cart = {}; state.selectedClienteId = null; state.checkoutComentarios = '';
+        abrirCotizacion(guardadaGC, cliGC, true);
+        toast('Cotización '+numeroCot(guardadaGC)+' guardada (no descontó inventario)');
+      } finally { state.guardandoCot = false; }
+    }
+    else if(action==='ver-cotizaciones'){ state.modal = { type:'lista-cotizaciones' }; render(); }
+    else if(action==='abrir-cotizacion'){ var cA = state.cotizaciones.find(function(c){ return c.id===id; }); if(cA) abrirCotizacion(cA); }
+    else if(action==='facturar-cotizacion' && state.modal && state.modal.type==='cotizacion'){
+      var cF = state.cotizaciones.find(function(c){ return c.id===state.modal.cotId; }) || state.modal.cot;
+      if(cF.estado==='facturada'){ toast('Esta cotización ya se facturó'); return; }
+      var fF = faltantesDe(cF.items);
+      if(fF.length){ toast('Todavía faltan productos para facturarla'); return; }
+      if(state.editandoVenta){ toast('Termina primero la edición de la factura'); return; }
+      if(state.cotizando) cambiarModoCotizar(false);
+      if(!miJornada()){ state.modal = null; state.activeTab = 'vender'; render(); toast('Para facturar, entra primero a la ruta o a Despachos y vuelve a tocar Facturar'); return; }
+      var cartVenta = Object.values(state.cart).reduce(function(a,b){ return a+b; }, 0);
+      if(cartVenta && !confirm('Tienes '+cartVenta+' producto(s) en un pedido sin facturar. Se reemplazan por los de la cotización. ¿Seguir?')) return;
+      state.cart = {};
+      (cF.items||[]).forEach(function(it){ var k = claveItem(it); state.cart[k] = (state.cart[k]||0) + (Number(it.cantidad)||0); });
+      state.selectedClienteId = cF.clienteId || null;
+      state.checkoutComentarios = cF.comentarios || '';
+      state.checkoutPago = 'contado'; state.checkoutAbono = 0; state.checkoutMedio = 'efectivo'; state.checkoutTransf = 0; state.checkoutComprobante = null;
+      state.cotFacturando = cF;
+      state.activeTab = 'vender';
+      state.modal = { type:'revisar-factura' }; render();
+    }
+    else if(action==='cancelar-facturar-cot'){ state.cotFacturando = null; state.cart = {}; state.selectedClienteId = null; state.checkoutComentarios = ''; render(); }
+    else if(action==='pedir-faltantes' && state.modal && state.modal.type==='cotizacion'){
+      var cP = state.cotizaciones.find(function(c){ return c.id===state.modal.cotId; }) || state.modal.cot;
+      var fP = faltantesDe(cP.items).filter(function(x){ return x.existe; });
+      if(!fP.length){ toast('No falta nada'); return; }
+      var cantP = {};
+      fP.forEach(function(x){ var p = productoById(x.productoId); cantP[x.productoId+'|'+(x.color||'')] = Math.ceil(x.falta / factorProducto(p)); });
+      state.pedido = { cant:cantP, sug:{}, rutas:[], prov:'', infoSug:'Faltantes de la cotización '+esc(numeroCot(cP))+' ('+esc(cP.clienteNombre||'')+')' };
+      state.modal = null; state.activeTab = 'inventario'; render(); window.scrollTo(0,0);
+      toast('Pedido con los faltantes de '+numeroCot(cP)+'. Revisa y genera el PDF.');
+    }
+    else if(action==='eliminar-cotizacion' && state.modal && state.modal.type==='cotizacion'){
+      var cE = state.modal.cot;
+      if(!confirm('¿Eliminar la cotización '+numeroCot(cE)+' de '+(cE.clienteNombre||'')+'?')) return;
+      enSegundoPlano(deleteDoc(doc(fs, 'cotizaciones/'+state.modal.cotId)));
+      state.cotizaciones = state.cotizaciones.filter(function(c){ return c.id!==state.modal.cotId; });
+      state.modal = null; render(); toast('Cotización eliminada');
     }
     else if(action==='abrir-revisar-factura'){
       if(Object.values(state.cart).reduce(function(a,b){return a+b;},0)===0){ toast('Agrega productos al pedido'); return; }
@@ -4681,7 +4944,7 @@ setPersistence(fbAuth, browserLocalPersistence).catch(function(){});
       } else {
         maxQ = (Number(pQ.stock)||0) + cantidadOriginal(pQ.id) - (cartTotalForProducto(pQ.id) - actualQ);
       }
-      if(nQ > maxQ){ nQ = Math.max(0, maxQ); toast('Solo hay '+nQ+' disponible(s)'+(colorQ?(' en '+colorQ):'')); }
+      if(nQ > maxQ && !state.cotizando){ nQ = Math.max(0, maxQ); toast('Solo hay '+nQ+' disponible(s)'+(colorQ?(' en '+colorQ):'')); }
       if(nQ > 0) state.cart[kQ] = nQ; else delete state.cart[kQ];
       render();
       return;

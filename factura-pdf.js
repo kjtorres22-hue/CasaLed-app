@@ -180,6 +180,9 @@ export const LEYENDA_DOC = 'Documento expedido por persona natural no responsabl
 
 export async function generarFacturaPDF(datos){
   const e = datos.empresa || {}, v = datos.venta || {}, cl = datos.cliente || {};
+  // Cotización: mismo formato que la cuenta de cobro, sin forma de pago ni saldo y sin descontar inventario
+  const cot = !!datos.cotizacion;
+  const TITULO = cot ? 'Cotización' : TITULO_DOC;
   const items = datos.items || [];
   const logo = await cargarImagenJPEG(datos.logoUrl, 300, '#000000');
   const fotos = await Promise.all(items.map((it) => cargarImagenJPEG(it.imagenUrl, 140, '#ffffff')));
@@ -210,13 +213,13 @@ export async function generarFacturaPDF(datos){
     // Caja de factura
     const wF = 168, xF = PAGE_W - M - wF, yF = 22;
     pdf.fill(NEGRO); pdf.rect(xF, yF, wF, 24, 'f');
-    pdf.text(TITULO_DOC.toUpperCase(), xF + wF / 2, yF + 16, { size: 11, bold: true, color: BLANCO, align: 'center' });
+    pdf.text(TITULO.toUpperCase(), xF + wF / 2, yF + 16, { size: 11, bold: true, color: BLANCO, align: 'center' });
     pdf.stroke(LINEA); pdf.lineWidth(0.8);
     const filas = [
       ['N.°', String(v.numero || '')],
       ['Fecha', fechaCorta(v.fecha)],
-      ['Pago', v.tipoPago === 'credito' ? 'Crédito' : 'Contado'],
-      ...(v.tipoPago === 'credito' && v.fechaVencimiento ? [['Vence', fechaCorta(v.fechaVencimiento)]] : []),
+      ...(cot ? [['Vigencia', 'Según disponibilidad']] : [['Pago', v.tipoPago === 'credito' ? 'Crédito' : 'Contado']]),
+      ...(!cot && v.tipoPago === 'credito' && v.fechaVencimiento ? [['Vence', fechaCorta(v.fechaVencimiento)]] : []),
       ['Asesor', v.vendedorNombre || '']
     ];
     let yR = yF + 24;
@@ -278,7 +281,7 @@ export async function generarFacturaPDF(datos){
 
   function continuacion(){
     pdf.fill(NEGRO); pdf.rect(0, 0, PAGE_W, 4, 'f');
-    pdf.text((e.nombre || 'Casa LED') + ' · ' + TITULO_DOC + ' N.° ' + (v.numero || '') + ' · ' + (cl.nombre || '') + ' (continuación)', M, 24, { size: 9, bold: true, color: GRIS });
+    pdf.text((e.nombre || 'Casa LED') + ' · ' + TITULO + ' N.° ' + (v.numero || '') + ' · ' + (cl.nombre || '') + ' (continuación)', M, 24, { size: 9, bold: true, color: GRIS });
     return 36;
   }
 
@@ -311,7 +314,7 @@ export async function generarFacturaPDF(datos){
   y += 12;
 
   // Totales y notas (si no caben, nueva página)
-  const credito = v.tipoPago === 'credito';
+  const credito = !cot && v.tipoPago === 'credito';
   const altoTot = credito ? 104 : 70;
   if(y + altoTot > LIMITE){ pie(); pdf.addPage(); pagina++; y = continuacion() + 6; }
   const unidades = items.reduce((s, it) => s + (Number(it.cantidad) || 0), 0);
@@ -334,15 +337,17 @@ export async function generarFacturaPDF(datos){
   // Caja izquierda: forma de pago y resumen
   const wL = ANCHO - wT - 14;
   const lineasL = [];
+  if(cot) lineasL.push(['Precios sujetos a disponibilidad de inventario', { size: 9, bold: true, color: NEGRO }]);
   if(credito && v.fechaVencimiento) lineasL.push(['Vence el ' + fechaCorta(v.fechaVencimiento), { size: 10, bold: true, color: ROJO }]);
-  if(v.medioPago === 'mixto') lineasL.push(['Efectivo ' + cop(v.montoEfectivo) + ' · Transferencia ' + cop(v.montoTransferencia), { size: 9.5, bold: true, color: NEGRO }]);
+  if(!cot && v.medioPago === 'mixto') lineasL.push(['Efectivo ' + cop(v.montoEfectivo) + ' · Transferencia ' + cop(v.montoTransferencia), { size: 9.5, bold: true, color: NEGRO }]);
   lineasL.push([items.length + ' referencia(s) · ' + unidades + ' unidad(es)', { size: 9, color: GRIS }]);
   const yL = y + 50 + (lineasL.length - 1) * 15;
   const altoL = Math.max(yT, yL + 10) - y;
   pdf.stroke(LINEA); pdf.lineWidth(0.8); pdf.rect(M, y, wL, altoL, 'S');
-  pdf.text('FORMA DE PAGO', M + 10, y + 16, { size: 8, bold: true, color: GRIS });
+  pdf.text(cot ? 'DOCUMENTO' : 'FORMA DE PAGO', M + 10, y + 16, { size: 8, bold: true, color: GRIS });
   const medioTxt = v.medioPago === 'transferencia' ? 'TRANSFERENCIA' : (v.medioPago === 'efectivo' ? 'EFECTIVO' : (v.medioPago === 'mixto' ? 'EFECTIVO + TRANSF.' : ''));
-  pdf.text(credito ? 'CRÉDITO' : ('CONTADO' + (medioTxt ? ' · ' + medioTxt : ' · PAGADO')), M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
+  if(cot) pdf.text('COTIZACIÓN', M + 10, y + 32, { size: 13, bold: true, color: AZUL });
+  else pdf.text(credito ? 'CRÉDITO' : ('CONTADO' + (medioTxt ? ' · ' + medioTxt : ' · PAGADO')), M + 10, y + 32, { size: 13, bold: true, color: credito ? ROJO : [13, 150, 104] });
   lineasL.forEach((l, k) => pdf.text(l[0], M + 10, y + 50 + k * 15, l[1]));
 
   let yN = Math.max(yT, y + 60, yL + 8) + 10;
@@ -379,7 +384,7 @@ export async function generarFacturaPDF(datos){
   {
     const lineasN = [];
     notas.forEach((n) => pdf.envolver(n, ANCHO - 24, 8.5, false).forEach((l) => lineasN.push(l)));
-    pdf.envolver(LEYENDA_DOC, ANCHO - 24, 8.5, false).forEach((l) => lineasN.push(l));
+    pdf.envolver(cot ? 'Este documento es una cotización y no es una cuenta de cobro. Vigencia sujeta a disponibilidad de inventario: los precios y cantidades se confirman al momento de facturar.' : LEYENDA_DOC, ANCHO - 24, 8.5, false).forEach((l) => lineasN.push(l));
     const hN = 18 + lineasN.length * 11;
     if(yN + hN > LIMITE){ pie(); pdf.addPage(); pagina++; yN = continuacion() + 6; }
     pdf.stroke(LINEA); pdf.rect(M, yN, ANCHO, hN, 'S');
@@ -387,7 +392,7 @@ export async function generarFacturaPDF(datos){
     lineasN.forEach((l, k) => pdf.text(l, M + 12, yN + 26 + k * 11, { size: 8.5, color: GRIS }));
     yN += hN + 16;
   }
-  if(yN + 6 <= LIMITE) pdf.text('¡Gracias por su compra!', PAGE_W / 2, yN + 6, { size: 11, bold: true, color: AZUL, align: 'center' });
+  if(yN + 6 <= LIMITE) pdf.text(cot ? '¡Gracias por su interés!' : '¡Gracias por su compra!', PAGE_W / 2, yN + 6, { size: 11, bold: true, color: AZUL, align: 'center' });
   pie();
 
   return pdf.salida();
